@@ -22,9 +22,7 @@ use std::sync::Arc;
 use mesh_core::NodeId;
 use mesh_core::sign_in::normalize_email;
 use mesh_core::tokens::MICROTOKENS_PER_TOKEN;
-#[cfg(test)]
-use rusqlite::OptionalExtension;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 use crate::clock::unix_now;
@@ -129,6 +127,18 @@ impl Earnings {
         } else {
             Linked::Stale
         })
+    }
+
+    /// The email of the account `node_id` earns for, if it named one.
+    pub async fn operator_of(&self, node_id: &NodeId) -> rusqlite::Result<Option<String>> {
+        let connection = self.connection.lock().await;
+        connection
+            .query_row(
+                "SELECT email FROM operator WHERE node_id = ?1",
+                params![node_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// The nodes with value still held.

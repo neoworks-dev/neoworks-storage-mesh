@@ -2,7 +2,7 @@
 //! fast they upload, how often they disappear for good and how much they
 //! store, in SQLite.
 //!
-//! `<data>/measurements.sqlite3` holds four tables:
+//! `<data>/measurements.sqlite3` holds five tables:
 //!
 //! - `speed_test`: one row per timed speed test. A node's bandwidth is the
 //!   median of its recent ones, since one test can hit a busy moment.
@@ -15,6 +15,8 @@
 //! - `node_usage`: how many bytes each node last said it stores. Only the
 //!   node knows, so this is a claim; prices count it no higher than the
 //!   capacity the node offers.
+//! - `node_place`: the network and country the coordinator last found each
+//!   node in ([`crate::locate`]).
 //!
 //! The loss rate is losses per day of watching one node, which is what
 //! choosing a layout needs: the chance that a node holding a piece is gone
@@ -25,6 +27,8 @@ use std::path::Path;
 use mesh_core::NodeId;
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
+
+use crate::locate::Located;
 
 const DAY_SECONDS: u64 = 24 * 60 * 60;
 
@@ -66,6 +70,12 @@ impl Measurements {
                  node_id      TEXT PRIMARY KEY,
                  used_bytes   INTEGER NOT NULL,
                  reported_at  INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS node_place (
+                 node_id     TEXT PRIMARY KEY,
+                 network     TEXT,
+                 country     TEXT,
+                 located_at  INTEGER NOT NULL
              );",
         )?;
         Ok(Measurements {
@@ -142,6 +152,46 @@ impl Measurements {
                 |row| row.get(0),
             )
             .optional()
+    }
+
+    /// Notes where `node_id` was found at `located_at`, replacing where it
+    /// was found before.
+    pub async fn record_place(
+        &self,
+        node_id: &NodeId,
+        located: &Located,
+        located_at: u64,
+    ) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().await;
+        connection.execute(
+            "INSERT OR REPLACE INTO node_place (node_id, network, country, located_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                node_id.to_string(),
+                located.network,
+                located.country,
+                located_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Where `node_id` was last found, if it was found after `since`.
+    pub async fn place(&self, node_id: &NodeId, since: u64) -> rusqlite::Result<Located> {
+        let connection = self.connection.lock().await;
+        let place = connection
+            .query_row(
+                "SELECT network, country FROM node_place WHERE node_id = ?1 AND located_at > ?2",
+                params![node_id.to_string(), since],
+                |row| {
+                    Ok(Located {
+                        network: row.get(0)?,
+                        country: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(place.unwrap_or_default())
     }
 
     /// Notes that `node_id` answered at `answered_at`, starting a new life

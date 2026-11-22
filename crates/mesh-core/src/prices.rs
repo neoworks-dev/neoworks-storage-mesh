@@ -240,6 +240,9 @@ mod tests {
             bandwidth_bits_per_second: bits_per_second,
             used_bytes: Some(used),
             takes_allowance: false,
+            measured_network: None,
+            measured_country: None,
+            operator_id: None,
         }
     }
 

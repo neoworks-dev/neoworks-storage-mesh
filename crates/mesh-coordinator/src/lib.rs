@@ -25,6 +25,7 @@ mod clock;
 mod coordinator_key;
 mod earnings;
 mod expiry_warnings;
+mod locate;
 mod measurements;
 mod price_book;
 mod probe;
@@ -52,6 +53,7 @@ use tokio::sync::RwLock;
 use crate::accounts::Accounts;
 use crate::earnings::Earnings;
 use crate::expiry_warnings::ExpiryWarnings;
+use crate::locate::Locator;
 use crate::measurements::Measurements;
 use crate::price_book::PriceBook;
 use crate::registry::Registry;
@@ -145,6 +147,18 @@ pub async fn serve(
     let registry = Arc::new(data.registry);
     let measurements = Arc::new(data.measurements);
     let earnings = Arc::new(data.earnings);
+    let earnings_for_publish = earnings.clone();
+    // A coordinator whose tables can't be read still runs; its nodes are
+    // listed without network and country, and count as standing alone.
+    let locator = Locator::load(
+        settings.city_csv.as_deref(),
+        settings.asn_tsv.as_deref(),
+        settings.location,
+    )
+    .unwrap_or_else(|error| {
+        eprintln!("locating nodes: {error}");
+        Locator::empty()
+    });
     let tokens = Arc::new(data.tokens);
     let latest = Arc::new(RwLock::new(None));
     let prices = Arc::new(RwLock::new(None));
@@ -165,11 +179,11 @@ pub async fn serve(
     // All of them run on this task, so stopping the coordinator stops them all.
     tokio::select! {
         result = server => result,
-        () = probe::probe_forever(http, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
+        () = probe::probe_forever(http, locator, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = speed_test::measure_forever(registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = earnings::pay_out_forever(earnings, registry.clone(), tokens.clone(), settings.clone()) => Ok(()),
         () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
         () = price_book::price_forever(data.prices, data.key.clone(), latest.clone(), prices, settings.clone()) => Ok(()),
-        () = publish::publish_forever(registry, measurements, data.key, latest, settings) => Ok(()),
+        () = publish::publish_forever(registry, measurements, earnings_for_publish, data.key, latest, settings) => Ok(()),
     }
 }

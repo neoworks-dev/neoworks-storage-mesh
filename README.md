@@ -165,6 +165,18 @@ The coordinator keeps the secret locked under a key derived from the
 password, which it never sees. `mesh-index.json` is this device's copy of the index;
 `--index` names another, as a second device would have.
 
+### Locating nodes
+
+A coordinator works out each node's network and country from the address
+it reaches the node at, rather than believing the node. Download
+[DB-IP's IP to City Lite](https://db-ip.com/db/download/ip-to-city-lite)
+CSV and [iptoasn.com's](https://iptoasn.com) `ip2asn-combined.tsv`, unpack
+them, and start the coordinator with
+`--city-csv dbip-city-lite.csv --asn-tsv ip2asn-combined.tsv --location 50.11,8.68`,
+the last being where the coordinator is. Without them, every node counts as
+a network of its own.
+
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE). Node locations come from IP
+Geolocation by DB-IP (<https://db-ip.com>), licensed CC BY 4.0.

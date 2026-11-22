@@ -1,5 +1,6 @@
 //! What a coordinator's operator can tune.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use mesh_core::NodeId;
@@ -36,6 +37,15 @@ pub struct CoordinatorSettings {
     pub own_nodes: Vec<NodeId>,
     /// How often what nodes earned is settled and credited to operators.
     pub earnings_interval: Duration,
+    /// DB-IP's "IP to City Lite" CSV, which nodes are located in
+    /// ([`crate::locate`]); without it, no node has a country.
+    pub city_csv: Option<PathBuf>,
+    /// iptoasn.com's `ip2asn-combined.tsv`, which nodes' networks are looked
+    /// up in; without it, no node has a network.
+    pub asn_tsv: Option<PathBuf>,
+    /// Where the coordinator is, as latitude and longitude, for checking
+    /// locations against round-trip times; without it, none is ruled out.
+    pub location: Option<(f64, f64)>,
     /// How often the coordinator looks for accounts to warn about expiry.
     pub warning_interval: Duration,
     /// How far into a month an account that has not taken its tokens gets
@@ -52,7 +62,8 @@ impl Default for CoordinatorSettings {
     /// has it; uptime over one day; a speed test every hour, with bandwidth
     /// over a week; nodes lost after a week of silence, counted over 90
     /// days; records at most ten minutes off; 40 allowance tokens per account
-    /// and month, and no own nodes; earnings paid out every hour; warnings a week into the month and three
+    /// and month, and no own nodes; earnings paid out every hour; no tables
+    /// to locate nodes in; warnings a week into the month and three
     /// days before the end, looked for every hour.
     fn default() -> Self {
         CoordinatorSettings {
@@ -67,6 +78,9 @@ impl Default for CoordinatorSettings {
             monthly_allowance: 40,
             own_nodes: Vec::new(),
             earnings_interval: Duration::from_secs(60 * 60),
+            city_csv: None,
+            asn_tsv: None,
+            location: None,
             warning_interval: Duration::from_secs(60 * 60),
             first_warning_after: Duration::from_secs(7 * 24 * 60 * 60),
             final_warning_before: Duration::from_secs(3 * 24 * 60 * 60),

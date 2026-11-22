@@ -83,6 +83,17 @@ pub struct ListedNode {
     /// Whether the node is run by the coordinator itself, and so takes
     /// allowance tokens ([`crate::tokens::TokenKind::Allowance`]).
     pub takes_allowance: bool,
+    /// The network the coordinator found the node's address in, such as
+    /// `AS3320`, or `None` when it could not tell. Unlike the record's
+    /// `network`, the node can't choose it.
+    pub measured_network: Option<String>,
+    /// The country the coordinator located the node's address in, such as
+    /// `DE`, once round-trip times did not rule it out; `None` when unknown.
+    pub measured_country: Option<String>,
+    /// The same for every node whose earnings go to one account, and says
+    /// nothing else about the account; `None` while the node names no
+    /// operator. Unlike the record's `operator`, the node can't choose it.
+    pub operator_id: Option<String>,
 }
 
 /// Every node a coordinator knows, at one moment.
@@ -232,6 +243,9 @@ mod tests {
                 bandwidth_bits_per_second: None,
                 used_bytes: None,
                 takes_allowance: false,
+                measured_network: None,
+                measured_country: None,
+                operator_id: None,
             }],
             daily_loss_per_million: None,
         };

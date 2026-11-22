@@ -102,6 +102,12 @@ impl NodeList {
     /// Records a node did not sign itself are left out. A coordinator could
     /// otherwise list nodes under keys it made up, or move a real node to an
     /// address of its choosing.
+    ///
+    /// Operator and network are what the coordinator worked out, never what
+    /// the node claims: an operator claiming a different operator and
+    /// network for each of their nodes could otherwise collect a whole chunk.
+    /// A node the coordinator couldn't place counts as an operator and
+    /// network of its own.
     pub fn from_snapshot(
         snapshot: &Signed<NodeSnapshot>,
         coordinators: &CoordinatorList,
@@ -112,12 +118,16 @@ impl NodeList {
             .nodes
             .iter()
             .filter(|listed| listed.record.verify_node().is_ok())
-            .map(|listed| NodeInfo {
-                id: listed.record.body.node_id,
-                url: listed.record.body.url.clone(),
-                operator: listed.record.body.operator.clone(),
-                network: listed.record.body.network.clone(),
-                weight: f64::from(listed.uptime_permille) / 1000.0,
+            .map(|listed| {
+                let id = listed.record.body.node_id;
+                let on_its_own = || format!("node {id}");
+                NodeInfo {
+                    id,
+                    url: listed.record.body.url.clone(),
+                    operator: listed.operator_id.clone().unwrap_or_else(on_its_own),
+                    network: listed.measured_network.clone().unwrap_or_else(on_its_own),
+                    weight: f64::from(listed.uptime_permille) / 1000.0,
+                }
             })
             .collect();
         Ok(NodeList { nodes })
@@ -151,6 +161,9 @@ mod tests {
             bandwidth_bits_per_second: None,
             used_bytes: None,
             takes_allowance: false,
+            measured_network: None,
+            measured_country: None,
+            operator_id: None,
         }
     }
 
@@ -180,5 +193,34 @@ mod tests {
             NodeId::of(&key(1).verifying_key().to_bytes())
         );
         assert_eq!(list.nodes[0].weight, 0.9);
+    }
+
+    #[test]
+    fn operator_and_network_come_from_the_coordinator_not_the_node() {
+        let coordinator = key(10);
+        let coordinators = CoordinatorList {
+            version: 1,
+            keys: vec![CoordinatorKey(coordinator.verifying_key().to_bytes())],
+        };
+        let mut placed = listed(&key(1), &key(1), 1000);
+        placed.operator_id = Some("3f2a".into());
+        placed.measured_network = Some("AS3320".into());
+        let unplaced = listed(&key(2), &key(2), 1000);
+        let snapshot = NodeSnapshot {
+            published_at: 1,
+            nodes: vec![placed, unplaced],
+            daily_loss_per_million: None,
+        };
+
+        let list =
+            NodeList::from_snapshot(&Signed::sign(&coordinator, snapshot), &coordinators).unwrap();
+
+        assert_eq!(list.nodes[0].operator, "3f2a");
+        assert_eq!(list.nodes[0].network, "AS3320");
+        // Both claimed "alice" on AS3320; the one the coordinator couldn't
+        // place stands alone.
+        let alone = format!("node {}", list.nodes[1].id);
+        assert_eq!(list.nodes[1].operator, alone);
+        assert_eq!(list.nodes[1].network, alone);
     }
 }

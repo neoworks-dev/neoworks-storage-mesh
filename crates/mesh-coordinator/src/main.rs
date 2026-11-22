@@ -39,6 +39,17 @@ struct Arguments {
     /// allowance tokens; repeat for several.
     #[arg(long = "own-node")]
     own_nodes: Vec<NodeId>,
+    /// DB-IP's "IP to City Lite" CSV, to find which country nodes are in.
+    #[arg(long)]
+    city_csv: Option<PathBuf>,
+    /// iptoasn.com's `ip2asn-combined.tsv`, to find which network nodes are
+    /// in.
+    #[arg(long)]
+    asn_tsv: Option<PathBuf>,
+    /// Where the coordinator is, as `latitude,longitude`, to rule out node
+    /// locations its round trips are too short for.
+    #[arg(long, value_parser = parse_location)]
+    location: Option<(f64, f64)>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -48,6 +59,18 @@ struct Arguments {
 enum Command {
     /// Adds tokens to an account's paid balance, and prints the new balance.
     Credit { email: String, tokens: u64 },
+}
+
+/// A location written as `latitude,longitude`, such as `50.11,8.68`.
+fn parse_location(text: &str) -> Result<(f64, f64), String> {
+    let invalid = || format!("{text} is not latitude,longitude");
+    let (latitude, longitude) = text.split_once(',').ok_or_else(invalid)?;
+    let latitude: f64 = latitude.trim().parse().map_err(|_| invalid())?;
+    let longitude: f64 = longitude.trim().parse().map_err(|_| invalid())?;
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        return Err(invalid());
+    }
+    Ok((latitude, longitude))
 }
 
 #[tokio::main]
@@ -63,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_secs(arguments.publish_seconds),
         own_nodes: arguments.own_nodes,
+        city_csv: arguments.city_csv,
+        asn_tsv: arguments.asn_tsv,
+        location: arguments.location,
         ..CoordinatorSettings::default()
     };
     let listener = TcpListener::bind(arguments.listen)

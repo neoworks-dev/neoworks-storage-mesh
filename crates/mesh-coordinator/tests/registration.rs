@@ -193,6 +193,52 @@ async fn a_node_names_its_operator_when_it_registers() {
 }
 
 #[tokio::test]
+async fn the_coordinator_lists_where_it_found_a_node_and_who_runs_it() {
+    let tables = tempfile::tempdir().unwrap();
+    let city_csv = tables.path().join("cities.csv");
+    let asn_tsv = tables.path().join("networks.tsv");
+    std::fs::write(
+        &city_csv,
+        "127.0.0.0,127.255.255.255,EU,DE,Hesse,Frankfurt,50.11,8.68\n",
+    )
+    .unwrap();
+    std::fs::write(&asn_tsv, "127.0.0.0\t127.255.255.255\t64500\tDE\tTEST\n").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let data = CoordinatorData::open(directory.path()).unwrap();
+    let settings = CoordinatorSettings {
+        publish_interval: Duration::from_millis(100),
+        probe_interval: Duration::from_millis(100),
+        city_csv: Some(city_csv),
+        asn_tsv: Some(asn_tsv),
+        // Frankfurt itself, so any round trip reaches the listed place.
+        location: Some((50.11, 8.68)),
+        ..CoordinatorSettings::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let coordinator = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(mesh_coordinator::serve(listener, data, settings));
+    let (_node_data, node_url, node_key) = start_node().await;
+    let mut with_operator = registration(&coordinator, &node_url);
+    with_operator.operator_email = Some("op@example.org".into());
+    register(&reqwest::Client::new(), &node_key, &with_operator)
+        .await
+        .unwrap();
+
+    let snapshot = snapshot_where(&coordinator, |snapshot| {
+        snapshot
+            .nodes
+            .iter()
+            .any(|node| node.measured_network.is_some() && node.operator_id.is_some())
+    })
+    .await;
+
+    let node = &snapshot.body.nodes[0];
+    assert_eq!(node.measured_network.as_deref(), Some("AS64500"));
+    assert_eq!(node.measured_country.as_deref(), Some("DE"));
+    assert_eq!(node.operator_id.as_ref().map(String::len), Some(32));
+}
+
+#[tokio::test]
 async fn only_the_node_itself_can_name_its_operator() {
     let (_coordinator_data, coordinator, _coordinators) = start_coordinator().await;
     let node = SigningKey::from_bytes(&[1; 32]);
