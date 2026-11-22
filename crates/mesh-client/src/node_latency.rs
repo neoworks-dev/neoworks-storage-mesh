@@ -22,12 +22,15 @@ impl LatencyTable {
     }
 
     /// Starts timing a request to `node`; the time is recorded when the
-    /// returned timer is dropped.
-    pub(crate) fn start_timer(&self, node: &str) -> AnswerTimer<'_> {
+    /// returned timer is dropped. A request that ends before the node
+    /// answered counts as taking at least `no_answer`.
+    pub(crate) fn start_timer(&self, node: &str, no_answer: Duration) -> AnswerTimer<'_> {
         AnswerTimer {
             table: self,
             node: node.to_string(),
             started: Instant::now(),
+            no_answer,
+            answered: false,
         }
     }
 
@@ -50,18 +53,37 @@ impl LatencyTable {
 /// Recording on drop catches the requests a download cancels once it has
 /// enough pieces. Those come from the slowest nodes, and without a record
 /// they would keep the fast time of an earlier answer and be asked first
-/// again. A cancelled request records how long it ran, which is less than
-/// the node would have taken, but enough to rank it behind the nodes that
-/// answered.
+/// again.
+///
+/// A node that answered is recorded with the time the request ran, even
+/// when cancelled while sending the bytes. A node that never answered, or
+/// whose connection failed, is recorded as taking at least the time a
+/// request may take. Recording only how long it was waited on would rank a
+/// silent node ahead of healthy nodes that are slow under load.
 pub(crate) struct AnswerTimer<'table> {
     table: &'table LatencyTable,
     node: String,
     started: Instant,
+    no_answer: Duration,
+    answered: bool,
+}
+
+impl AnswerTimer<'_> {
+    /// Notes that the node answered, once its response began to arrive.
+    pub(crate) fn answered(&mut self) {
+        self.answered = true;
+    }
 }
 
 impl Drop for AnswerTimer<'_> {
     fn drop(&mut self) {
-        self.table.record(&self.node, self.started.elapsed());
+        let elapsed = self.started.elapsed();
+        let time = if self.answered {
+            elapsed
+        } else {
+            elapsed.max(self.no_answer)
+        };
+        self.table.record(&self.node, time);
     }
 }
 
@@ -77,13 +99,26 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_timer_records_the_time_it_ran() {
+    fn an_answered_request_records_the_time_it_ran() {
         let table = LatencyTable::default();
         table.record("http://node", Duration::from_secs(60));
 
-        let timer = table.start_timer("http://node");
+        let mut timer = table.start_timer("http://node", Duration::from_secs(30));
+        timer.answered();
         drop(timer);
 
-        assert!(table.last_answer("http://node").unwrap() < Duration::from_secs(60));
+        assert!(table.last_answer("http://node").unwrap() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_request_without_an_answer_counts_as_taking_the_full_time() {
+        let table = LatencyTable::default();
+
+        drop(table.start_timer("http://silent", Duration::from_secs(30)));
+
+        assert_eq!(
+            table.last_answer("http://silent"),
+            Some(Duration::from_secs(30))
+        );
     }
 }
