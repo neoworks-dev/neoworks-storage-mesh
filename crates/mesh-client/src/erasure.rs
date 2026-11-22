@@ -28,14 +28,14 @@ pub enum RebuildError {
 /// Cuts `sealed` into [`TOTAL_PIECES`] pieces of equal length: the data pieces
 /// first, then the parity pieces.
 pub fn cut(sealed: &[u8]) -> Vec<Vec<u8>> {
-    let piece_len = piece_len_for(sealed.len());
+    let piece_len = piece_len(sealed.len());
     let mut padded = sealed.to_vec();
     // The chunk is padded with zeros to fill the data pieces exactly; the
     // manifest keeps the real length, so the padding is cut off again.
     padded.resize(piece_len * DATA_PIECES, 0);
     let mut pieces: Vec<Vec<u8>> = padded.chunks(piece_len).map(<[u8]>::to_vec).collect();
     let parity = reed_solomon_simd::encode(DATA_PIECES, PARITY_PIECES, &pieces)
-        // `piece_len_for` keeps every piece the same even, non-zero length, and
+        // `piece_len` keeps every piece the same even, non-zero length, and
         // 4 + 2 pieces is a supported shape: the only inputs encode refuses.
         .expect("pieces of equal even length in a supported shape");
     pieces.extend(parity);
@@ -81,10 +81,10 @@ fn restore_missing_data_pieces(
     Ok(())
 }
 
-/// The length of each piece for a chunk of `sealed_len` bytes: a quarter of
+/// The length of each piece of a chunk of `sealed_len` bytes: a quarter of
 /// it, rounded up to an even number, since the Reed-Solomon implementation
 /// works on pairs of bytes.
-fn piece_len_for(sealed_len: usize) -> usize {
+pub fn piece_len(sealed_len: usize) -> usize {
     let quarter = sealed_len.div_ceil(DATA_PIECES).max(1);
     quarter + quarter % 2
 }

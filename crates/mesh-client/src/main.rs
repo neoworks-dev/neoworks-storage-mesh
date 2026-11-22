@@ -4,6 +4,7 @@
 //! mesh put photo.jpg --manifest photo.manifest.json \
 //!     --node http://127.0.0.1:7001 --node http://127.0.0.1:7002 … (six in all)
 //! mesh renew photo.manifest.json --days 30
+//! mesh audit photo.manifest.json
 //! mesh get photo.manifest.json photo-again.jpg
 //! ```
 //!
@@ -14,7 +15,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use mesh_client::{Manifest, NodeClient};
+use mesh_client::erasure::DATA_PIECES;
+use mesh_client::{AUDIT_DEADLINE, Manifest, NodeClient, PieceHealth};
 
 #[derive(Parser)]
 struct Arguments {
@@ -43,6 +45,8 @@ enum Command {
         #[arg(long, default_value_t = 30)]
         days: u64,
     },
+    /// Checks that the nodes still hold every piece, without downloading them.
+    Audit { manifest: PathBuf },
     /// Reads a file back from the nodes its manifest names.
     Get { manifest: PathBuf, output: PathBuf },
 }
@@ -58,8 +62,39 @@ async fn main() -> anyhow::Result<()> {
             days,
         } => put(&client, &file, &manifest, &nodes, days).await,
         Command::Renew { manifest, days } => renew(&client, &manifest, days).await,
+        Command::Audit { manifest } => audit(&client, &manifest).await,
         Command::Get { manifest, output } => get(&client, &manifest, &output).await,
     }
+}
+
+/// Prints one line per chunk, the unhealthy pieces under it, and whether the
+/// file can still be read.
+async fn audit(client: &NodeClient, manifest_path: &Path) -> anyhow::Result<()> {
+    let manifest = read_manifest(manifest_path)?;
+    let report = mesh_client::audit(client, &manifest, AUDIT_DEADLINE).await;
+    for (index, (chunk, chunk_audit)) in manifest.chunks.iter().zip(&report.chunks).enumerate() {
+        println!(
+            "chunk {index}: {} of {} pieces healthy",
+            chunk_audit.healthy(),
+            chunk_audit.pieces.len()
+        );
+        for (piece, health) in chunk.pieces.iter().zip(&chunk_audit.pieces) {
+            if *health != PieceHealth::Healthy {
+                println!("  {:?} on {}", health, piece.node);
+            }
+        }
+    }
+    let unreadable = report
+        .chunks
+        .iter()
+        .filter(|chunk_audit| chunk_audit.healthy() < DATA_PIECES)
+        .count();
+    if unreadable == 0 {
+        println!("every chunk can be read");
+    } else {
+        println!("{unreadable} chunks have fewer than {DATA_PIECES} healthy pieces");
+    }
+    Ok(())
 }
 
 async fn put(

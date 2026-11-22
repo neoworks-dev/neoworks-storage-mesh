@@ -10,9 +10,11 @@
 //!    there for a lease the owner sets.
 //!
 //! The [`Manifest`] that comes out holds the key and where every piece is.
-//! [`download`] uses it to fetch, rebuild and open the file again, and
-//! [`renew`] to keep it stored; a file nobody renews expires.
+//! [`download`] uses it to fetch, rebuild and open the file again, [`renew`]
+//! to keep it stored, and [`audit`] to check that the nodes still hold it. A
+//! file nobody renews expires.
 
+mod audit;
 mod download;
 pub mod encryption;
 pub mod erasure;
@@ -21,6 +23,7 @@ mod node_client;
 mod renew;
 mod upload;
 
+pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHealth, audit};
 pub use download::{DownloadError, download};
 pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
 pub use node_client::{NodeClient, NodeRequestError};

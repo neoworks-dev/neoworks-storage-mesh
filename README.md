@@ -21,8 +21,9 @@ it into erasure-coded pieces and spread those over independent nodes.
 Early. A file can be stored on six nodes and read back while any two of them
 are down, have lost their pieces or return corrupted ones. Nodes keep each
 piece for a lease and delete it once the lease ends unless it is renewed,
-which is also how a file is deleted. There are no coordinators, tokens or
-audits yet; the issues track what comes next.
+which is also how a file is deleted. An audit checks that the nodes still
+hold every piece, from a few random segments with Merkle proofs. There are
+no coordinators, tokens or repair yet; the issues track what comes next.
 
 ## Layout
 
@@ -60,6 +61,12 @@ longer, renew it before then:
 
 ```sh
 target/release/mesh renew photo.manifest.json --days 30
+```
+
+To check that the nodes still hold every piece, without downloading them:
+
+```sh
+target/release/mesh audit photo.manifest.json
 ```
 
 ## License
