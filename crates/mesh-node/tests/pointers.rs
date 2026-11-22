@@ -2,25 +2,19 @@
 
 use mesh_core::pointer::{Pointer, SigningKey};
 use mesh_core::protocol::{LeaseResponse, PointerConflict, pointer_path};
-use mesh_node::{NodeSettings, PieceStore, PointerStore};
+use mesh_node::{NodeData, NodeSettings};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 /// A node running in this process; it stops when the test ends.
 async fn start_node() -> (TempDir, String) {
-    let data = tempfile::tempdir().unwrap();
-    let store = PieceStore::open(data.path()).await.unwrap();
-    let pointers = PointerStore::open(data.path()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let data = NodeData::open(directory.path()).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(mesh_node::serve(
-        listener,
-        store,
-        pointers,
-        NodeSettings::default(),
-    ));
-    (data, url)
+    tokio::spawn(mesh_node::serve(listener, data, NodeSettings::default()));
+    (directory, url)
 }
 
 fn pointer(version: u64, target: &[u8]) -> Pointer {

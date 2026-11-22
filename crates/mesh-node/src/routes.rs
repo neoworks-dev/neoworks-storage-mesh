@@ -10,12 +10,13 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use mesh_core::pointer::{Pointer, parse_owner};
 use mesh_core::protocol::{
-    CHALLENGE_ROUTE, ChallengeRequest, ChallengeResponse, LEASE_ROUTE, LeaseQuery, LeaseResponse,
-    MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, PIECE_ROUTE, POINTER_ROUTE, PointerConflict,
+    CHALLENGE_ROUTE, ChallengeRequest, ChallengeResponse, IDENTITY_ROUTE, LEASE_ROUTE, LeaseQuery,
+    LeaseResponse, MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, NodeIdentity, PIECE_ROUTE,
+    POINTER_ROUTE, PointerConflict,
 };
 use mesh_core::{PieceId, merkle};
 
@@ -29,10 +30,11 @@ use crate::settings::NodeSettings;
 struct Node {
     store: Arc<PieceStore>,
     pointers: Arc<PointerStore>,
+    identity: Arc<NodeIdentity>,
     max_lease_seconds: u64,
 }
 
-/// The router of a node serving `store` and `pointers`.
+/// The router of the node `identity`, serving `store` and `pointers`.
 ///
 /// Ids that are not 64 lowercase hex digits and requests without
 /// `lease_seconds` are refused by the extractors with `400 Bad Request` before
@@ -40,11 +42,13 @@ struct Node {
 pub fn router(
     store: Arc<PieceStore>,
     pointers: Arc<PointerStore>,
+    identity: NodeIdentity,
     settings: &NodeSettings,
 ) -> Router {
     let node = Node {
         store,
         pointers,
+        identity: Arc::new(identity),
         max_lease_seconds: settings.max_lease.as_secs(),
     };
     Router::new()
@@ -52,8 +56,14 @@ pub fn router(
         .route(LEASE_ROUTE, post(renew_lease))
         .route(CHALLENGE_ROUTE, post(answer_challenge))
         .route(POINTER_ROUTE, put(put_pointer).get(get_pointer))
+        .route(IDENTITY_ROUTE, get(get_identity))
         .layer(DefaultBodyLimit::max(MAX_PIECE_BYTES))
         .with_state(node)
+}
+
+/// `GET /identity`: the node's id and public key.
+async fn get_identity(State(node): State<Node>) -> Json<NodeIdentity> {
+    Json(NodeIdentity::clone(&node.identity))
 }
 
 /// `PUT /pieces/{id}?lease_seconds=N`: stores the body as the piece `id`.

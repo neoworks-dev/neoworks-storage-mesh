@@ -9,7 +9,8 @@ use std::time::Duration;
 use mesh_core::PieceId;
 use mesh_core::merkle::SegmentProof;
 use mesh_core::protocol::{
-    ChallengeRequest, ChallengeResponse, LeaseResponse, challenge_path, lease_path, piece_path,
+    ChallengeRequest, ChallengeResponse, IDENTITY_ROUTE, LeaseResponse, NodeIdentity,
+    challenge_path, lease_path, piece_path,
 };
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
@@ -48,9 +49,32 @@ pub enum NodeRequestError {
     WrongBytes { node: String, id: PieceId },
     #[error("node {node} answered in a form this client does not understand")]
     UnexpectedAnswer { node: String },
+    #[error("node {node} claims an id that is not the hash of its key")]
+    InconsistentIdentity { node: String },
 }
 
 impl NodeClient {
+    /// Who the node at `node` says it is, once its id is checked against its
+    /// key.
+    pub async fn identity(&self, node: &str) -> Result<NodeIdentity, NodeRequestError> {
+        let response = self
+            .http
+            .get(node_url(node, IDENTITY_ROUTE))
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let identity: NodeIdentity = read_json(node, response).await?;
+        if !identity.is_consistent() {
+            return Err(NodeRequestError::InconsistentIdentity {
+                node: node.to_string(),
+            });
+        }
+        Ok(identity)
+    }
+
     /// A client with the default timeout.
     pub fn new() -> Result<Self, reqwest::Error> {
         let http = reqwest::Client::builder()

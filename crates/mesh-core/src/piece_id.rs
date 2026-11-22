@@ -9,6 +9,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::canonical_hex::parse_canonical_hex;
+
 /// The BLAKE3 hash of a piece's bytes, written as 64 lowercase hex digits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PieceId([u8; 32]);
@@ -46,18 +48,9 @@ impl FromStr for PieceId {
     type Err = ParsePieceIdError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        // Only the canonical lowercase form is accepted, so every piece has
-        // exactly one spelling. Nodes use it as a file name, and two spellings
-        // of one id would be two files.
-        let is_canonical = text.len() == 64
-            && text
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        if !is_canonical {
-            return Err(ParsePieceIdError);
-        }
-        let mut bytes = [0u8; 32];
-        hex::decode_to_slice(text, &mut bytes).map_err(|_| ParsePieceIdError)?;
+        // Nodes name piece files by this spelling, so only the canonical one
+        // is accepted: two spellings of one id would be two files.
+        let bytes = parse_canonical_hex(text).ok_or(ParsePieceIdError)?;
         Ok(PieceId(bytes))
     }
 }

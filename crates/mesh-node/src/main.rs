@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use mesh_node::{NodeSettings, PieceStore, PointerStore};
+use mesh_node::{NodeData, NodeSettings};
 use tokio::net::TcpListener;
 
 /// Runs a storage node that keeps pieces in a directory.
@@ -19,7 +19,8 @@ struct Arguments {
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:7001")]
     listen: SocketAddr,
-    /// Directory the pieces and their leases are kept in; created if missing.
+    /// Directory the node's key, pieces, pointers and leases are kept in;
+    /// created if missing.
     #[arg(long)]
     data: PathBuf,
     /// The longest lease the node grants, in days.
@@ -34,15 +35,14 @@ async fn main() -> anyhow::Result<()> {
         max_lease: Duration::from_secs(arguments.max_lease_days * 24 * 60 * 60),
         ..NodeSettings::default()
     };
-    let store = PieceStore::open(&arguments.data)
+    let data = NodeData::open(&arguments.data)
         .await
         .with_context(|| format!("opening {}", arguments.data.display()))?;
-    let pointers = PointerStore::open(&arguments.data)
-        .with_context(|| format!("opening the pointers in {}", arguments.data.display()))?;
     let listener = TcpListener::bind(arguments.listen)
         .await
         .with_context(|| format!("listening on {}", arguments.listen))?;
-    println!("node listening on http://{}", arguments.listen);
-    mesh_node::serve(listener, store, pointers, settings).await?;
+    println!("node {}", data.identity().node_id);
+    println!("listening on http://{}", arguments.listen);
+    mesh_node::serve(listener, data, settings).await?;
     Ok(())
 }

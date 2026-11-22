@@ -27,16 +27,21 @@
 //! - `GET /pointers/{owner}` returns the newest [`Pointer`] the node holds,
 //!   or `404 Not Found`.
 //!
+//! And one about itself:
+//!
+//! - `GET /identity` returns the node's [`NodeIdentity`]: its id and the
+//!   public key the id is the hash of.
+//!
 //! Storing and renewing both answer with a [`LeaseResponse`] in JSON.
 //! Lease ends are Unix times in seconds on the node's clock; clients send a
 //! length rather than an end, so their clocks never have to agree with it.
 
 use serde::{Deserialize, Serialize};
 
-use crate::PieceId;
 use crate::merkle::SegmentProof;
 #[cfg(doc)]
 use crate::pointer::Pointer;
+use crate::{NodeId, PieceId};
 
 /// The route of a piece, in the router syntax of `axum`.
 pub const PIECE_ROUTE: &str = "/pieces/{id}";
@@ -105,6 +110,28 @@ pub const POINTER_ROUTE: &str = "/pointers/{owner}";
 /// The path of the pointer of `owner`, e.g. `/pointers/3d4f…`.
 pub fn pointer_path(owner: &[u8; 32]) -> String {
     format!("/pointers/{}", hex::encode(owner))
+}
+
+/// The route of a node's identity.
+pub const IDENTITY_ROUTE: &str = "/identity";
+
+/// Who a node is: its id and the public key the id is the hash of.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeIdentity {
+    pub node_id: NodeId,
+    /// The node's Ed25519 public key.
+    #[serde(with = "hex")]
+    pub public_key: [u8; 32],
+}
+
+impl NodeIdentity {
+    /// Whether the id is the hash of the key. Anyone can claim any id, so an
+    /// identity that comes from outside is only worth anything once this
+    /// holds; proving the node also holds the private key is up to records
+    /// it signs.
+    pub fn is_consistent(&self) -> bool {
+        NodeId::of(&self.public_key) == self.node_id
+    }
 }
 
 /// The answer to storing a pointer that is not newer than the one the node

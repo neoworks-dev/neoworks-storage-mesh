@@ -24,6 +24,8 @@
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
+use crate::canonical_hex::parse_canonical_hex;
+
 /// The key a pointer's owner signs with.
 pub use ed25519_dalek::SigningKey;
 
@@ -101,18 +103,7 @@ impl Pointer {
 /// The owner key written as 64 lowercase hex digits, as it is in URLs, or
 /// `None` for any other text.
 pub fn parse_owner(text: &str) -> Option<[u8; 32]> {
-    // Only the canonical form is accepted, so every owner has exactly one
-    // URL and a node cannot end up holding two records for one key.
-    let is_canonical = text.len() == 64
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-    if !is_canonical {
-        return None;
-    }
-    let mut owner = [0u8; 32];
-    hex::decode_to_slice(text, &mut owner).ok()?;
-    Some(owner)
+    parse_canonical_hex(text)
 }
 
 fn check_target_len(target: &[u8]) -> Result<(), PointerError> {

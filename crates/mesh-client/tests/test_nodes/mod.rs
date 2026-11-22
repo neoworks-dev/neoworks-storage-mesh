@@ -12,13 +12,15 @@ use mesh_client::{
     ChunkRecord, DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece,
     UploadError, download, upload,
 };
-use mesh_node::{NodeSettings, PieceStore, PointerStore};
+use mesh_core::NodeId;
+use mesh_node::{NodeData, NodeSettings};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 /// A node running in this process.
 pub struct TestNode {
+    pub id: NodeId,
     pub url: String,
     data: TempDir,
     server: JoinHandle<std::io::Result<()>>,
@@ -27,12 +29,17 @@ pub struct TestNode {
 impl TestNode {
     pub async fn start(settings: NodeSettings) -> TestNode {
         let data = tempfile::tempdir().unwrap();
-        let store = PieceStore::open(data.path()).await.unwrap();
-        let pointers = PointerStore::open(data.path()).unwrap();
+        let node_data = NodeData::open(data.path()).await.unwrap();
+        let id = node_data.identity().node_id;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(mesh_node::serve(listener, store, pointers, settings));
-        TestNode { url, data, server }
+        let server = tokio::spawn(mesh_node::serve(listener, node_data, settings));
+        TestNode {
+            id,
+            url,
+            data,
+            server,
+        }
     }
 
     /// Stops the node: its port refuses new connections.

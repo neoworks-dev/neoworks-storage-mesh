@@ -948,6 +948,8 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "getrandom",
+ "hex",
  "mesh-core",
  "reqwest",
  "rusqlite",
