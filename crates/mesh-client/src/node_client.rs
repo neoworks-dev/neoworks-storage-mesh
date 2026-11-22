@@ -372,15 +372,17 @@ impl NodeClient {
     /// The piece `id` from `node`, or `None` when the node does not have it.
     ///
     /// The time the request runs, answered, failed or cancelled, is recorded
-    /// as the node's latency.
+    /// as the node's latency; a node that never answered counts as taking
+    /// the whole request timeout.
     pub async fn get(&self, node: &str, id: &PieceId) -> Result<Option<Vec<u8>>, NodeRequestError> {
-        let _timer = self.latencies.start_timer(node);
+        let mut timer = self.latencies.start_timer(node, REQUEST_TIMEOUT);
         let response = self
             .http
             .get(node_url(node, &piece_path(id)))
             .send()
             .await
             .map_err(|source| unreachable(node, source))?;
+        timer.answered();
         if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
