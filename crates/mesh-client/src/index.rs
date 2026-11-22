@@ -71,13 +71,18 @@ pub struct Session<'a> {
 impl Session<'_> {
     /// The index's writer: the account's own keys.
     fn writer(&self) -> Writer<'_> {
+        self.writer_for(CollectionKeys {
+            head_key: self.account.pointer_key(),
+            read_key: self.account.message_key(),
+        })
+    }
+
+    /// A writer of the collection with `keys`, as this device.
+    pub fn writer_for(&self, keys: CollectionKeys) -> Writer<'_> {
         Writer {
             client: self.client,
             list: self.list,
-            keys: CollectionKeys {
-                head_key: self.account.pointer_key(),
-                read_key: self.account.message_key(),
-            },
+            keys,
             dedup_key: self.account.dedup_key(),
             device: self.device.clone(),
             lease: self.lease,
@@ -222,9 +227,32 @@ impl Index {
     /// are. The index's commits are renewed with them; letting those expire
     /// would lose the list of files while the files themselves live on.
     pub async fn renew(&mut self, session: &Session<'_>) -> Result<IndexRenewal, IndexError> {
+        self.renew_with_collections(session, &mut BTreeMap::new())
+            .await
+    }
+
+    /// Renews like [`renew`](Self::renew), and also `collections`, this
+    /// device's copies of collections by name: their commits go into the same
+    /// requests, and their pointers are written again. A collection whose
+    /// keys the index doesn't hold is left alone and reported.
+    pub async fn renew_with_collections(
+        &mut self,
+        session: &Session<'_>,
+        collections: &mut BTreeMap<String, Collection>,
+    ) -> Result<IndexRenewal, IndexError> {
         self.pull(session).await?;
         let files = self.files()?;
-        let commit_manifests = self.collection.commit_manifests()?;
+        let mut commit_manifests = self.collection.commit_manifests()?;
+        let mut kept = Vec::new();
+        let mut unknown_collections = Vec::new();
+        for (name, collection) in collections.iter_mut() {
+            let Some(keys) = self.collection_keys(name)? else {
+                unknown_collections.push(name.clone());
+                continue;
+            };
+            commit_manifests.extend(collection.commit_manifests()?);
+            kept.push((keys, collection));
+        }
         let renewed_until = unix_now() + session.lease.as_secs();
         let pieces = files
             .iter()
@@ -246,10 +274,17 @@ impl Index {
         } else {
             self.save(session, changes).await?;
         }
+        // Writing a collection's pointer again renews it the same way.
+        let collections_renewed = kept.len();
+        for (keys, collection) in kept {
+            collection.publish(&session.writer_for(keys)).await?;
+        }
         Ok(IndexRenewal {
             pieces_renewed: renewal.renewed.len(),
             pieces_not_renewed: renewal.not_renewed.len(),
             at_risk,
+            collections_renewed,
+            unknown_collections,
         })
     }
 
@@ -282,6 +317,11 @@ pub struct IndexRenewal {
     /// They are unreadable from their old `renew_by` on unless repaired
     /// first.
     pub at_risk: Vec<IndexedFile>,
+    /// How many of the collections handed in were renewed.
+    pub collections_renewed: usize,
+    /// Collections handed in whose keys the index doesn't hold, which were
+    /// not renewed.
+    pub unknown_collections: Vec<String>,
 }
 
 /// Whether every chunk of `manifest` has enough renewed pieces to rebuild it.

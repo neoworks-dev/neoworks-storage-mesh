@@ -4,6 +4,7 @@
 
 mod test_nodes;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use mesh_client::account::Account;
@@ -93,6 +94,35 @@ async fn another_device_finds_the_collection_through_the_index() {
     assert_eq!(phone_index.collections().unwrap(), vec!["calendar"]);
     assert!(phone_index.files().unwrap().is_empty());
     assert_eq!(calendar.entries().unwrap()["event-1"][&1], json!("dentist"));
+}
+
+#[tokio::test]
+async fn renewing_the_index_renews_the_collections_handed_in() {
+    let nodes = start().await;
+    let list = node_list(&nodes);
+    let client = NodeClient::new().unwrap();
+    let account = Account::generate();
+    let access = calendar_with_an_event(&client, &list, &account).await;
+    let session = session(&client, &list, &account);
+    let mut index = Index::default();
+    let alone = index.renew(&session).await.unwrap();
+    let mut calendar = Collection::default();
+    calendar.follow(&client, &list, &access).await.unwrap();
+    let mut collections = BTreeMap::from([
+        ("calendar".to_string(), calendar),
+        ("photos".to_string(), Collection::default()),
+    ]);
+
+    let together = index
+        .renew_with_collections(&session, &mut collections)
+        .await
+        .unwrap();
+
+    // The calendar's one commit adds its pieces to the same requests.
+    assert!(together.pieces_renewed > alone.pieces_renewed);
+    assert_eq!(together.pieces_not_renewed, 0);
+    assert_eq!(together.collections_renewed, 1);
+    assert_eq!(together.unknown_collections, vec!["photos"]);
 }
 
 #[tokio::test]
