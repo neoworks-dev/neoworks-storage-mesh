@@ -171,31 +171,40 @@ pub async fn store_on(
     upload(&client, list, &DedupKey::generate(), file, lease, &[]).await
 }
 
-/// Downloads the file `manifest` describes into memory.
+/// Downloads the file `manifest` describes from nodes in `list` into memory.
 pub async fn download_bytes(
     client: &NodeClient,
+    list: &NodeList,
     manifest: &Manifest,
 ) -> Result<Vec<u8>, DownloadError> {
     let mut file = Vec::new();
-    download(client, manifest, &mut file).await?;
+    download(client, list, manifest, &mut file).await?;
     Ok(file)
 }
 
-/// The piece of `chunk` that lives on the node at `url`.
-pub fn piece_on<'chunk>(chunk: &'chunk ChunkRecord, url: &str) -> &'chunk PlacedPiece {
+/// The URL of the node among `nodes` whose id is `node`.
+pub fn url_of<'a>(nodes: &'a [TestNode], node: &NodeId) -> &'a str {
+    let test_node = nodes.iter().find(|test_node| test_node.id == *node);
+    &test_node
+        .expect("the piece is on one of the test nodes")
+        .url
+}
+
+/// The piece of `chunk` that lives on the node `node`.
+pub fn piece_on<'chunk>(chunk: &'chunk ChunkRecord, node: &NodeId) -> &'chunk PlacedPiece {
     chunk
         .pieces
         .iter()
-        .find(|piece| piece.node == url)
+        .find(|piece| piece.node == *node)
         .expect("every test node holds one piece of every chunk")
 }
 
-/// Where in `chunk` the piece on the node at `url` sits.
-pub fn position_on(chunk: &ChunkRecord, url: &str) -> usize {
+/// Where in `chunk` the piece on the node `node` sits.
+pub fn position_on(chunk: &ChunkRecord, node: &NodeId) -> usize {
     chunk
         .pieces
         .iter()
-        .position(|piece| piece.node == url)
+        .position(|piece| piece.node == *node)
         .expect("every test node holds one piece of every chunk")
 }
 

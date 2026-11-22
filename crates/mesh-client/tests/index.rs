@@ -92,7 +92,9 @@ async fn a_new_device_finds_every_file_from_the_account_alone() {
     assert_eq!(names(&phone_index), ["notes.txt", "photo.jpg"]);
     let found = phone_index.file("photo.jpg").unwrap().unwrap();
     assert_eq!(
-        download_bytes(&client, &found.manifest).await.unwrap(),
+        download_bytes(&client, &list, &found.manifest)
+            .await
+            .unwrap(),
         photo
     );
 }

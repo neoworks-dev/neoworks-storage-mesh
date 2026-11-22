@@ -70,14 +70,16 @@ pub async fn store_commit(
     })
 }
 
-/// Fetches the commit `reference` names and checks it is that commit.
+/// Fetches the commit `reference` names from nodes in `list` and checks it is
+/// that commit.
 pub async fn fetch_commit(
     client: &NodeClient,
+    list: &NodeList,
     reference: &CommitRef,
 ) -> Result<Commit, FetchCommitError> {
     let id = reference.id;
     let mut bytes = Vec::new();
-    download(client, &reference.manifest, &mut bytes)
+    download(client, list, &reference.manifest, &mut bytes)
         .await
         .map_err(|source| FetchCommitError::Download { id, source })?;
     if CommitId::of(&bytes) != id {
@@ -90,6 +92,7 @@ pub async fn fetch_commit(
 /// returns how many there were.
 pub async fn fetch_new(
     client: &NodeClient,
+    list: &NodeList,
     graph: &mut Graph,
     head: &CommitRef,
 ) -> Result<usize, FetchCommitError> {
@@ -99,7 +102,7 @@ pub async fn fetch_new(
         if graph.contains(&reference.id) {
             continue;
         }
-        let commit = fetch_commit(client, &reference).await?;
+        let commit = fetch_commit(client, list, &reference).await?;
         wanted.extend(commit.parents.iter().cloned());
         graph.insert(reference.id, commit);
         fetched += 1;

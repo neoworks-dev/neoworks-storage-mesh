@@ -30,13 +30,14 @@ fn sample_file() -> Vec<u8> {
 #[tokio::test]
 async fn an_unrenewed_file_expires_and_leaves_the_disk() {
     let nodes = start_nodes(quickly_sweeping()).await;
-    let manifest = store_on(&node_list(&nodes), &sample_file(), Duration::from_secs(1))
+    let list = node_list(&nodes);
+    let manifest = store_on(&list, &sample_file(), Duration::from_secs(1))
         .await
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(2_500)).await;
 
-    let result = download_bytes(&NodeClient::new().unwrap(), &manifest).await;
+    let result = download_bytes(&NodeClient::new().unwrap(), &list, &manifest).await;
     assert!(matches!(
         result,
         Err(DownloadError::Rebuild {
@@ -54,22 +55,27 @@ async fn a_renewed_file_outlives_its_first_lease() {
     let nodes = start_nodes(quickly_sweeping()).await;
     let client = NodeClient::new().unwrap();
     let file = sample_file();
-    let manifest = store_on(&node_list(&nodes), &file, Duration::from_secs(2))
+    let list = node_list(&nodes);
+    let manifest = store_on(&list, &file, Duration::from_secs(2))
         .await
         .unwrap();
 
-    let report = renew(&client, &manifest, Duration::from_secs(60)).await;
+    let report = renew(&client, &list, &manifest, Duration::from_secs(60)).await;
     tokio::time::sleep(Duration::from_millis(3_200)).await;
 
     assert_eq!(report.renewed, manifest.chunks.len() * TOTAL_PIECES);
     assert!(report.not_renewed.is_empty());
-    assert_eq!(download_bytes(&client, &manifest).await.unwrap(), file);
+    assert_eq!(
+        download_bytes(&client, &list, &manifest).await.unwrap(),
+        file
+    );
 }
 
 #[tokio::test]
 async fn renewing_reports_the_pieces_of_a_node_that_is_down() {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let manifest = store_on(&node_list(&nodes), &sample_file(), Duration::from_secs(60))
+    let list = node_list(&nodes);
+    let manifest = store_on(&list, &sample_file(), Duration::from_secs(60))
         .await
         .unwrap();
     let chunks = manifest.chunks.len();
@@ -77,6 +83,7 @@ async fn renewing_reports_the_pieces_of_a_node_that_is_down() {
     nodes[3].stop();
     let report = renew(
         &NodeClient::new().unwrap(),
+        &list,
         &manifest,
         Duration::from_secs(120),
     )
@@ -88,7 +95,34 @@ async fn renewing_reports_the_pieces_of_a_node_that_is_down() {
         report
             .not_renewed
             .iter()
-            .all(|piece| piece.node == nodes[3].url)
+            .all(|piece| piece.node == nodes[3].id)
+    );
+}
+
+#[tokio::test]
+async fn renewing_skips_the_pieces_of_a_node_missing_from_the_list() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let mut list = node_list(&nodes);
+    let manifest = store_on(&list, &sample_file(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    let chunks = manifest.chunks.len();
+
+    list.nodes.retain(|node| node.id != nodes[2].id);
+    let report = renew(
+        &NodeClient::new().unwrap(),
+        &list,
+        &manifest,
+        Duration::from_secs(120),
+    )
+    .await;
+
+    assert_eq!(report.renewed, chunks * (TOTAL_PIECES - 1));
+    assert!(
+        report
+            .not_renewed
+            .iter()
+            .all(|piece| piece.node == nodes[2].id)
     );
 }
 

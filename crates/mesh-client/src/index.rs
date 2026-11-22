@@ -163,7 +163,7 @@ impl Index {
             .chain(&commit_manifests)
             .flat_map(|manifest| &manifest.chunks)
             .flat_map(|chunk| &chunk.pieces);
-        let renewal = renew_pieces(session.client, pieces, session.lease).await;
+        let renewal = renew_pieces(session.client, session.list, pieces, session.lease).await;
         let (safe, at_risk): (Vec<IndexedFile>, Vec<IndexedFile>) = files
             .into_iter()
             .partition(|file| is_readable(&file.manifest, &renewal));
@@ -297,7 +297,7 @@ impl Index {
         remote: CommitRef,
         version: u64,
     ) -> Result<bool, IndexError> {
-        fetch_new(session.client, &mut self.graph, &remote).await?;
+        fetch_new(session.client, session.list, &mut self.graph, &remote).await?;
         self.version = self.version.max(version);
         let Some(local) = &self.head else {
             self.head = Some(remote);

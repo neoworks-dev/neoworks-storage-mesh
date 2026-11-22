@@ -12,7 +12,7 @@ use anyhow::Context;
 use clap::Args;
 use mesh_client::account::Account;
 use mesh_client::index::{Index, Session, unix_now};
-use mesh_client::{NodeClient, upload};
+use mesh_client::{NodeClient, NodeList, upload};
 use mesh_core::sign_in::KdfParams;
 
 use crate::{NodeListArguments, days_to_duration, download_to, load_node_list};
@@ -159,7 +159,8 @@ pub async fn store(
 
 /// Prints every file in the index.
 pub async fn list_files(client: &NodeClient, arguments: &AccountArguments) -> anyhow::Result<()> {
-    let index = pulled_index(client, arguments).await?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let index = pulled_index(client, &list, arguments).await?;
     for file in index.files()? {
         println!(
             "{}\t{} bytes\trenew by {}",
@@ -176,11 +177,12 @@ pub async fn fetch(
     output: &Path,
     arguments: &AccountArguments,
 ) -> anyhow::Result<()> {
-    let index = pulled_index(client, arguments).await?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let index = pulled_index(client, &list, arguments).await?;
     let Some(file) = index.file(name)? else {
         anyhow::bail!("the index has no file called {name}");
     };
-    download_to(client, &file.manifest, output).await
+    download_to(client, &list, &file.manifest, output).await
 }
 
 /// Renews every file of the account, the index's history and its pointer,
@@ -213,13 +215,16 @@ pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> any
     Ok(())
 }
 
-/// This device's index, brought up to date and saved.
-async fn pulled_index(client: &NodeClient, arguments: &AccountArguments) -> anyhow::Result<Index> {
+/// This device's index, brought up to date from nodes in `list` and saved.
+async fn pulled_index(
+    client: &NodeClient,
+    list: &NodeList,
+    arguments: &AccountArguments,
+) -> anyhow::Result<Index> {
     let account = read_account(&arguments.account)?;
-    let list = load_node_list(client, &arguments.nodes).await?;
     let session = Session {
         client,
-        list: &list,
+        list,
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),

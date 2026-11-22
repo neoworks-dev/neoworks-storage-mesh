@@ -18,6 +18,7 @@ use mesh_core::merkle::{self, MerkleHash, SegmentProof};
 use crate::erasure;
 use crate::manifest::{Manifest, PlacedPiece};
 use crate::node_client::{NodeClient, NodeRequestError};
+use crate::node_list::NodeList;
 use crate::random::random_u32;
 
 /// Segments asked for per piece. A node that kept only half of a piece passes
@@ -70,7 +71,15 @@ impl ChunkAudit {
 
 /// Audits every piece of the file `manifest` describes. Each node gets
 /// `deadline` to answer; [`AUDIT_DEADLINE`] is the usual value.
-pub async fn audit(client: &NodeClient, manifest: &Manifest, deadline: Duration) -> AuditReport {
+///
+/// Nodes are found at their addresses in `list`; a piece on a node it does
+/// not have is [`PieceHealth::Unreachable`].
+pub async fn audit(
+    client: &NodeClient,
+    list: &NodeList,
+    manifest: &Manifest,
+    deadline: Duration,
+) -> AuditReport {
     let mut chunks = Vec::with_capacity(manifest.chunks.len());
     for chunk in &manifest.chunks {
         let piece_len = erasure::piece_len(chunk.sealed_len as usize);
@@ -80,7 +89,7 @@ pub async fn audit(client: &NodeClient, manifest: &Manifest, deadline: Duration)
         let audits = chunk
             .pieces
             .iter()
-            .map(|piece| audit_piece(client, piece, &segments, deadline));
+            .map(|piece| audit_piece(client, list, piece, &segments, deadline));
         chunks.push(ChunkAudit {
             pieces: join_all(audits).await,
         });
@@ -91,11 +100,15 @@ pub async fn audit(client: &NodeClient, manifest: &Manifest, deadline: Duration)
 /// Challenges the node of `piece` for `segments` and judges its answer.
 async fn audit_piece(
     client: &NodeClient,
+    list: &NodeList,
     piece: &PlacedPiece,
     segments: &[u32],
     deadline: Duration,
 ) -> PieceHealth {
-    let challenge = client.challenge(&piece.node, &piece.id, segments);
+    let Some(url) = list.url_of(&piece.node) else {
+        return PieceHealth::Unreachable;
+    };
+    let challenge = client.challenge(url, &piece.id, segments);
     let Ok(answer) = tokio::time::timeout(deadline, challenge).await else {
         return PieceHealth::Unreachable;
     };

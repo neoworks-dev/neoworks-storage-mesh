@@ -18,7 +18,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use futures::future::join_all;
-use mesh_core::{PieceId, merkle};
+use mesh_core::{NodeId, PieceId, merkle};
 use reqwest::Url;
 
 use crate::erasure::PARITY_PIECES;
@@ -37,26 +37,27 @@ pub const MAX_PER_NETWORK: usize = PARITY_PIECES;
 /// Chooses up to `count` nodes from `list` for pieces of one chunk; fewer
 /// when the rules allow no more.
 ///
-/// `holding` are the URLs of the nodes that already hold pieces of the chunk;
-/// the new nodes have to fit the rules together with them. Nodes whose URL is
-/// in `excluded` are never chosen, such as nodes that just refused a piece.
+/// `holding` are the ids of the nodes that already hold pieces of the chunk;
+/// the new nodes have to fit the rules together with those still in the list.
+/// Nodes in `excluded` are never chosen, such as nodes that just refused a
+/// piece.
 pub fn choose<'list>(
     list: &'list NodeList,
     count: usize,
-    holding: &[&str],
-    excluded: &[&str],
+    holding: &[NodeId],
+    excluded: &[NodeId],
 ) -> Vec<&'list NodeInfo> {
     let mut chosen: Vec<&NodeInfo> = holding
         .iter()
-        .filter_map(|url| list.nodes.iter().find(|node| node.url == *url))
+        .filter_map(|id| list.nodes.iter().find(|node| node.id == *id))
         .collect();
     let first_new = chosen.len();
     let mut candidates: Vec<&NodeInfo> = list
         .nodes
         .iter()
         .filter(|node| node.weight > 0.0)
-        .filter(|node| !holding.contains(&node.url.as_str()))
-        .filter(|node| !excluded.contains(&node.url.as_str()))
+        .filter(|node| !holding.contains(&node.id))
+        .filter(|node| !excluded.contains(&node.id))
         .collect();
     while chosen.len() - first_new < count {
         candidates.retain(|candidate| fits(candidate, &chosen));
@@ -79,30 +80,29 @@ pub async fn store_pieces(
     client: &NodeClient,
     list: &NodeList,
     pieces: &[Vec<u8>],
-    holding: &[&str],
-    excluded: &[&str],
+    holding: &[NodeId],
+    excluded: &[NodeId],
     lease: Duration,
 ) -> Vec<Option<PlacedPiece>> {
     let mut placed: Vec<Option<PlacedPiece>> = vec![None; pieces.len()];
-    let mut excluded: Vec<String> = excluded.iter().map(|url| url.to_string()).collect();
+    let mut excluded: Vec<NodeId> = excluded.to_vec();
     loop {
         let waiting: Vec<usize> = (0..pieces.len()).filter(|&i| placed[i].is_none()).collect();
-        let mut holding_now: Vec<&str> = holding.to_vec();
-        holding_now.extend(placed.iter().flatten().map(|piece| piece.node.as_str()));
-        let excluded_now: Vec<&str> = excluded.iter().map(String::as_str).collect();
-        let nodes = choose(list, waiting.len(), &holding_now, &excluded_now);
+        let mut holding_now: Vec<NodeId> = holding.to_vec();
+        holding_now.extend(placed.iter().flatten().map(|piece| piece.node));
+        let nodes = choose(list, waiting.len(), &holding_now, &excluded);
         if nodes.is_empty() {
             return placed;
         }
         let attempts = waiting
             .iter()
             .zip(&nodes)
-            .map(|(&index, node)| store_one(client, &pieces[index], &node.url, lease));
+            .map(|(&index, node)| store_one(client, &pieces[index], node, lease));
         let results = join_all(attempts).await;
         for ((&index, node), result) in waiting.iter().zip(&nodes).zip(results) {
             match result {
                 Some(piece) => placed[index] = Some(piece),
-                None => excluded.push(node.url.clone()),
+                None => excluded.push(node.id),
             }
         }
     }
@@ -112,15 +112,15 @@ pub async fn store_pieces(
 async fn store_one(
     client: &NodeClient,
     bytes: &[u8],
-    node: &str,
+    node: &NodeInfo,
     lease: Duration,
 ) -> Option<PlacedPiece> {
     let id = PieceId::of(bytes);
-    match client.put(node, &id, bytes.to_vec(), lease).await {
+    match client.put(&node.url, &id, bytes.to_vec(), lease).await {
         Ok(_) => Some(PlacedPiece {
             id,
             merkle_root: merkle::root_of(bytes),
-            node: node.to_string(),
+            node: node.id,
         }),
         Err(error) => {
             eprintln!("{error}");
@@ -145,7 +145,7 @@ pub(crate) fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo]) -> bool {
         && chosen
             .iter()
             .any(|node| subnet_of(&node.url) == candidate_subnet);
-    chosen.iter().all(|node| node.url != candidate.url)
+    chosen.iter().all(|node| node.id != candidate.id)
         && same_operator < MAX_PER_OPERATOR
         && same_network < MAX_PER_NETWORK
         && !same_subnet
@@ -200,8 +200,8 @@ mod tests {
 
     fn node(url: &str, operator: &str, network: &str) -> NodeInfo {
         NodeInfo {
-            // Placement compares nodes by URL, so an id made from it does.
-            id: mesh_core::NodeId::of(blake3::hash(url.as_bytes()).as_bytes()),
+            // Each test node needs an id of its own; its URL makes one.
+            id: NodeId::of(blake3::hash(url.as_bytes()).as_bytes()),
             url: url.to_string(),
             operator: operator.to_string(),
             network: network.to_string(),
@@ -285,7 +285,7 @@ mod tests {
     fn new_nodes_fit_the_rules_together_with_the_holding_ones() {
         let list = diverse_list();
         // operator-0 already holds two pieces of this chunk.
-        let holding = ["http://10.0.0.1:7001", "http://10.0.1.1:7001"];
+        let holding = [list.nodes[0].id, list.nodes[1].id];
 
         for _ in 0..100 {
             let chosen = choose(&list, 2, &holding, &[]);
@@ -300,7 +300,7 @@ mod tests {
         list.nodes[3].weight = 0.0;
 
         for _ in 0..100 {
-            let chosen_urls = urls(&choose(&list, 4, &[], &["http://10.0.5.1:7001"]));
+            let chosen_urls = urls(&choose(&list, 4, &[], &[list.nodes[5].id]));
             assert!(!chosen_urls.contains(&"http://10.0.3.1:7001".to_string()));
             assert!(!chosen_urls.contains(&"http://10.0.5.1:7001".to_string()));
         }

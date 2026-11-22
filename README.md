@@ -81,11 +81,14 @@ sleep 10
 target/release/mesh put photo.jpg --coordinator http://127.0.0.1:7000 \
   --coordinators coordinators.json --manifest photo.manifest.json
 kill %3 %6
-target/release/mesh get photo.manifest.json photo-again.jpg
+target/release/mesh get photo.manifest.json photo-again.jpg \
+  --coordinator http://127.0.0.1:7000 --coordinators coordinators.json
 ```
 
-Instead of a coordinator, `--nodes nodes.json` takes a list you write, as
-`mesh_client::NodeList` describes, with each node's id as it printed it.
+The manifest names nodes by id, so every command, `get` too, looks up where
+the nodes are now in the node list. Instead of a coordinator, `--nodes
+nodes.json` takes a list you write, as `mesh_client::NodeList` describes, with
+each node's id as it printed it.
 
 The manifest holds the chunk keys, so anyone who has it can read the file.
 The first `put` also creates `mesh.key`, your dedup key: keep it private, and
@@ -105,13 +108,15 @@ target/release/mesh put photo-edited.jpg --coordinator http://127.0.0.1:7000 \
 longer, renew it before then:
 
 ```sh
-target/release/mesh renew photo.manifest.json --days 30
+target/release/mesh renew photo.manifest.json --coordinator http://127.0.0.1:7000 \
+  --coordinators coordinators.json --days 30
 ```
 
 To check that the nodes still hold every piece, without downloading them:
 
 ```sh
-target/release/mesh audit photo.manifest.json
+target/release/mesh audit photo.manifest.json --coordinator http://127.0.0.1:7000 \
+  --coordinators coordinators.json
 ```
 
 When nodes have lost pieces, rebuild them onto other nodes from the list.

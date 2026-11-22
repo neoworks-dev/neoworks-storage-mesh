@@ -6,7 +6,6 @@
 
 mod test_nodes;
 
-use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,7 +14,10 @@ use std::time::{Duration, Instant};
 
 use mesh_client::chunking::{AVERAGE_CHUNK_BYTES, MAX_CHUNK_BYTES, MIN_CHUNK_BYTES};
 use mesh_client::erasure::{DATA_PIECES, RebuildError};
-use mesh_client::{DedupKey, DownloadError, Manifest, NodeClient, UploadError, upload};
+use mesh_client::{
+    DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, UploadError, upload,
+};
+use mesh_core::NodeId;
 use mesh_node::NodeSettings;
 use test_nodes::{
     RequestGauge, TestNode, download_bytes, node_list, random_file, start_nodes, start_silent_node,
@@ -35,9 +37,15 @@ async fn store(nodes: &[TestNode], file: &[u8]) -> Result<Manifest, UploadError>
     store_on(&node_list(nodes), file, LEASE).await
 }
 
-/// Reads with a new client, so no connection opened during the upload is reused.
-async fn read_back(manifest: &Manifest) -> Result<Vec<u8>, DownloadError> {
-    download_bytes(&NodeClient::new().unwrap(), manifest).await
+/// Reads from `nodes` with a new client, so no connection opened during the
+/// upload is reused.
+async fn read_back(nodes: &[TestNode], manifest: &Manifest) -> Result<Vec<u8>, DownloadError> {
+    read_back_with(&node_list(nodes), manifest).await
+}
+
+/// Reads from the nodes in `list` with a new client.
+async fn read_back_with(list: &NodeList, manifest: &Manifest) -> Result<Vec<u8>, DownloadError> {
+    download_bytes(&NodeClient::new().unwrap(), list, manifest).await
 }
 
 /// A reader that hands out at most 777 bytes per read, the way a network
@@ -86,32 +94,42 @@ async fn a_file_comes_back_unchanged() {
             .all(|&length| (MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(&length))
     );
     assert!(*last <= MAX_CHUNK_BYTES);
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    assert_eq!(read_back(&nodes, &manifest).await.unwrap(), file);
+}
+
+#[tokio::test]
+async fn nodes_are_found_at_their_new_address_after_they_move() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = sample_file();
+    let manifest = store(&nodes, &file).await.unwrap();
+    // The node list now has every node at another address, which forwards to
+    // the node, as if each had moved there.
+    let gauge = Arc::new(RequestGauge::default());
+    let mut list = node_list(&nodes);
+    for node in &mut list.nodes {
+        node.url = start_slow_proxy(node.url.clone(), Duration::ZERO, gauge.clone()).await;
+    }
+
+    assert_eq!(read_back_with(&list, &manifest).await.unwrap(), file);
+    assert!(gauge.most() > 0);
 }
 
 #[tokio::test]
 async fn chunks_are_fetched_side_by_side_and_written_in_order() {
     let nodes = start_nodes(NodeSettings::default()).await;
     let file = sample_file();
-    let mut manifest = store(&nodes, &file).await.unwrap();
+    let manifest = store(&nodes, &file).await.unwrap();
     assert!(manifest.chunks.len() > 1);
     // Every node answers only after a delay, so requests for different
     // chunks overlap if the download sends them side by side.
     let gauge = Arc::new(RequestGauge::default());
-    let mut proxies = HashMap::new();
-    for node in &nodes {
-        let proxy = start_slow_proxy(node.url.clone(), Duration::from_millis(300), gauge.clone());
-        proxies.insert(node.url.clone(), proxy.await);
-    }
-    for piece in manifest
-        .chunks
-        .iter_mut()
-        .flat_map(|chunk| &mut chunk.pieces)
-    {
-        piece.node = proxies[&piece.node].clone();
+    let mut list = node_list(&nodes);
+    for node in &mut list.nodes {
+        let delay = Duration::from_millis(300);
+        node.url = start_slow_proxy(node.url.clone(), delay, gauge.clone()).await;
     }
 
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    assert_eq!(read_back_with(&list, &manifest).await.unwrap(), file);
 
     // One chunk alone never asks more than four nodes at once.
     assert!(
@@ -147,7 +165,7 @@ async fn survives_two_nodes_going_down() {
     nodes[0].stop();
     nodes[4].stop();
 
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    assert_eq!(read_back(&nodes, &manifest).await.unwrap(), file);
 }
 
 #[tokio::test]
@@ -159,7 +177,26 @@ async fn survives_one_node_losing_and_one_corrupting_its_pieces() {
     nodes[1].lose_all_pieces();
     nodes[2].corrupt_all_pieces();
 
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    assert_eq!(read_back(&nodes, &manifest).await.unwrap(), file);
+}
+
+#[tokio::test]
+async fn nodes_missing_from_the_list_count_as_down() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = sample_file();
+    let manifest = store(&nodes, &file).await.unwrap();
+
+    let read_from_four = read_back(&nodes[..4], &manifest).await;
+    let read_from_three = read_back(&nodes[..3], &manifest).await;
+
+    assert_eq!(read_from_four.unwrap(), file);
+    assert!(matches!(
+        read_from_three,
+        Err(DownloadError::Rebuild {
+            source: RebuildError::TooFewPieces { found: 3 },
+            ..
+        })
+    ));
 }
 
 #[tokio::test]
@@ -171,16 +208,24 @@ async fn a_node_that_never_answers_is_passed_over_and_remembered() {
     // Decoding and decrypting take seconds in a debug build, so the time of
     // a read from healthy nodes is the baseline.
     let started = Instant::now();
-    read_back(&manifest).await.unwrap();
+    read_back(&nodes, &manifest).await.unwrap();
     let healthy = started.elapsed();
     // Piece 0 is a data piece, so an unmeasured client asks for it first.
-    let silent = start_silent_node().await;
+    let mut list = node_list(&nodes);
+    let silent = NodeInfo {
+        id: NodeId::of(&[9; 32]),
+        url: start_silent_node().await,
+        operator: "silent".into(),
+        network: "silent".into(),
+        weight: 1.0,
+    };
     for chunk in &mut manifest.chunks {
-        chunk.pieces[0].node = silent.clone();
+        chunk.pieces[0].node = silent.id;
     }
+    list.nodes.push(silent);
 
     let started = Instant::now();
-    let read = read_back(&manifest).await.unwrap();
+    let read = read_back_with(&list, &manifest).await.unwrap();
     let with_silent = started.elapsed();
 
     assert_eq!(read, file);
@@ -203,7 +248,7 @@ async fn fails_when_three_nodes_are_down() {
     nodes[2].stop();
     nodes[5].stop();
 
-    let result = read_back(&manifest).await;
+    let result = read_back(&nodes, &manifest).await;
 
     assert!(matches!(
         result,
@@ -221,7 +266,10 @@ async fn an_empty_file_comes_back_empty() {
     let manifest = store(&nodes, &[]).await.unwrap();
 
     assert!(manifest.chunks.is_empty());
-    assert_eq!(read_back(&manifest).await.unwrap(), Vec::<u8>::new());
+    assert_eq!(
+        read_back(&nodes, &manifest).await.unwrap(),
+        Vec::<u8>::new()
+    );
 }
 
 #[tokio::test]
@@ -252,7 +300,7 @@ async fn a_file_read_in_small_pieces_is_cut_like_one_read_at_once() {
             .collect()
     };
     assert_eq!(lengths(&trickled), lengths(&at_once));
-    assert_eq!(read_back(&trickled).await.unwrap(), file);
+    assert_eq!(read_back(&nodes, &trickled).await.unwrap(), file);
 }
 
 #[tokio::test]
@@ -308,8 +356,8 @@ async fn nodes_that_are_down_are_passed_over() {
             chunk
                 .pieces
                 .iter()
-                .all(|piece| piece.node != nodes[1].url && piece.node != nodes[6].url)
+                .all(|piece| piece.node != nodes[1].id && piece.node != nodes[6].id)
         );
     }
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    assert_eq!(read_back(&nodes, &manifest).await.unwrap(), file);
 }

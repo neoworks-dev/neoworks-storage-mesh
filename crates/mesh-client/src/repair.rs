@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use futures::future::join_all;
-use mesh_core::PieceId;
+use mesh_core::{NodeId, PieceId};
 
 use crate::audit::{AuditReport, ChunkAudit, PieceHealth};
 use crate::erasure::{cut, rebuild};
@@ -81,7 +81,7 @@ async fn repair_chunk(
     if chunk_audit.healthy() > REPAIR_AT {
         return ChunkRepair::Intact;
     }
-    let survivors = fetch_healthy_pieces(client, chunk, chunk_audit).await;
+    let survivors = fetch_healthy_pieces(client, list, chunk, chunk_audit).await;
     let fetched = survivors.iter().filter(|piece| piece.is_some()).count();
     let Ok(sealed) = rebuild(&survivors, chunk.sealed_len as usize) else {
         return ChunkRepair::Lost { fetched };
@@ -126,28 +126,27 @@ async fn repair_chunk(
     }
 }
 
-/// The URLs of the nodes of `chunk` whose pieces are healthy, and of those
+/// The ids of the nodes of `chunk` whose pieces are healthy, and of those
 /// whose pieces are not.
-fn nodes_by_health<'chunk>(
-    chunk: &'chunk ChunkRecord,
-    chunk_audit: &ChunkAudit,
-) -> (Vec<&'chunk str>, Vec<&'chunk str>) {
+fn nodes_by_health(chunk: &ChunkRecord, chunk_audit: &ChunkAudit) -> (Vec<NodeId>, Vec<NodeId>) {
     let mut healthy = Vec::new();
     let mut unhealthy = Vec::new();
     for (piece, health) in chunk.pieces.iter().zip(&chunk_audit.pieces) {
         if *health == PieceHealth::Healthy {
-            healthy.push(piece.node.as_str());
+            healthy.push(piece.node);
         } else {
-            unhealthy.push(piece.node.as_str());
+            unhealthy.push(piece.node);
         }
     }
     (healthy, unhealthy)
 }
 
-/// The pieces the audit found healthy, fetched again; every other piece is
-/// `None`. A piece that fails to arrive now is `None` too.
+/// The pieces the audit found healthy, fetched again from their nodes'
+/// addresses in `list`; every other piece is `None`. A piece that fails to
+/// arrive now is `None` too.
 async fn fetch_healthy_pieces(
     client: &NodeClient,
+    list: &NodeList,
     chunk: &ChunkRecord,
     chunk_audit: &ChunkAudit,
 ) -> Vec<Option<Vec<u8>>> {
@@ -159,9 +158,10 @@ async fn fetch_healthy_pieces(
             if *health != PieceHealth::Healthy {
                 return None;
             }
+            let url = list.url_of(&piece.node)?;
             // `get` checks the bytes against the piece id, so a node can't
             // slip wrong bytes into the rebuild.
-            client.get(&piece.node, &piece.id).await.ok().flatten()
+            client.get(url, &piece.id).await.ok().flatten()
         });
     join_all(fetches).await
 }
