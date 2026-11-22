@@ -1,7 +1,8 @@
 //! Signing and publishing snapshots of the node list.
 //!
 //! A snapshot holds every node that answered at least one check in the
-//! uptime window, with its record, its uptime, its bandwidth, what it says it
+//! uptime window, with its record, its uptime, the share of audits it
+//! passed, its bandwidth, what it says it
 //! stores, the network and country the coordinator found it in and an id of
 //! its operator, and the loss rate over all nodes. Nodes that stopped
 //! answering drop out of the next snapshot; their records stay in the
@@ -13,6 +14,7 @@ use mesh_core::node_list::{ListedNode, NodeSnapshot};
 use mesh_core::signed::{Signed, SigningKey};
 use tokio::sync::RwLock;
 
+use crate::audit_log::AuditLog;
 use crate::clock::unix_now;
 use crate::earnings::Earnings;
 use crate::measurements::Measurements;
@@ -27,6 +29,7 @@ pub async fn snapshot(
     registry: &Registry,
     measurements: &Measurements,
     earnings: &Earnings,
+    audits: &AuditLog,
     key: &SigningKey,
     settings: &CoordinatorSettings,
     now: u64,
@@ -48,6 +51,7 @@ pub async fn snapshot(
         nodes.push(ListedNode {
             record,
             uptime_permille,
+            audit_pass_permille: audits.pass_permille(&node_id, uptime_since).await?,
             bandwidth_bits_per_second: measurements.bandwidth(&node_id, bandwidth_since).await?,
             used_bytes: measurements.usage(&node_id, uptime_since).await?,
             takes_allowance: settings.own_nodes.contains(&node_id),
@@ -83,6 +87,7 @@ pub async fn publish_forever(
     registry: Arc<Registry>,
     measurements: Arc<Measurements>,
     earnings: Arc<Earnings>,
+    audits: Arc<AuditLog>,
     key: SigningKey,
     latest: Arc<LatestSnapshot>,
     settings: CoordinatorSettings,
@@ -94,6 +99,7 @@ pub async fn publish_forever(
             &registry,
             &measurements,
             &earnings,
+            &audits,
             &key,
             &settings,
             unix_now(),

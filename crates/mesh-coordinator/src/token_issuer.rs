@@ -13,7 +13,8 @@
 use std::path::Path;
 
 use blind_rsa_signatures::{
-    BlindMessage, DefaultRng, KeyPairSha384PSSRandomized, SecretKeySha384PSSRandomized,
+    BlindMessage, DefaultRng, KeyPairSha384PSSRandomized, PublicKeySha384PSSRandomized,
+    SecretKeySha384PSSRandomized,
 };
 use mesh_core::sign_in::normalize_email;
 use mesh_core::tokens::{HexBytes, Token, TokenKind};
@@ -159,6 +160,43 @@ impl TokenIssuer {
         )?;
         transaction.commit()?;
         Ok(signatures)
+    }
+
+    /// A paid token of `month` for the coordinator's own use: paying nodes to
+    /// keep its audit pieces.
+    ///
+    /// It goes through blinding like any account's token, so it looks the
+    /// same to the node; no balance pays for it, since the coordinator is
+    /// the one that issues paid tokens. When the node spends it, its value
+    /// goes to the node's operator like any other.
+    pub async fn mint_own(&self, month: u64) -> Result<Token, IssueError> {
+        let connection = self.connection.lock().await;
+        let (secret_key, public_key) = key_of(&connection, month, TokenKind::Paid)?;
+        let key_error = |error: blind_rsa_signatures::Error| IssueError::Key(error.to_string());
+        let secret_key = SecretKeySha384PSSRandomized::from_der(&secret_key).map_err(key_error)?;
+        let public_key = PublicKeySha384PSSRandomized::from_der(&public_key).map_err(key_error)?;
+        let mut message = [0u8; 32];
+        getrandom::fill(&mut message).expect("the operating system's random source works");
+        let blinding = public_key
+            .blind(&mut DefaultRng, message)
+            .map_err(key_error)?;
+        let blind_signature = secret_key
+            .blind_sign(&blinding.blind_message)
+            .map_err(key_error)?;
+        let signature = public_key
+            .finalize(&blind_signature, &blinding, message)
+            .map_err(key_error)?;
+        // The randomized variant always sets a randomizer when blinding.
+        let randomizer = blinding
+            .msg_randomizer
+            .ok_or_else(|| IssueError::Key("blinding set no randomizer".into()))?;
+        Ok(Token {
+            month,
+            kind: TokenKind::Paid,
+            message,
+            randomizer: randomizer.0,
+            signature: signature.0,
+        })
     }
 
     /// The accounts that took tokens in the month before `month` but none in

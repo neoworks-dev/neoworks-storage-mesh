@@ -37,6 +37,8 @@ pub struct CoordinatorSettings {
     pub own_nodes: Vec<NodeId>,
     /// How often what nodes earned is settled and credited to operators.
     pub earnings_interval: Duration,
+    /// How often every node is challenged for the coordinator's audit piece.
+    pub audit_interval: Duration,
     /// DB-IP's "IP to City Lite" CSV, which nodes are located in
     /// ([`crate::locate`]); without it, no node has a country.
     pub city_csv: Option<PathBuf>,
@@ -62,7 +64,8 @@ impl Default for CoordinatorSettings {
     /// has it; uptime over one day; a speed test every hour, with bandwidth
     /// over a week; nodes lost after a week of silence, counted over 90
     /// days; records at most ten minutes off; 40 allowance tokens per account
-    /// and month, and no own nodes; earnings paid out every hour; no tables
+    /// and month, and no own nodes; earnings paid out and nodes audited
+    /// every hour; no tables
     /// to locate nodes in; warnings a week into the month and three
     /// days before the end, looked for every hour.
     fn default() -> Self {
@@ -78,6 +81,7 @@ impl Default for CoordinatorSettings {
             monthly_allowance: 40,
             own_nodes: Vec::new(),
             earnings_interval: Duration::from_secs(60 * 60),
+            audit_interval: Duration::from_secs(60 * 60),
             city_csv: None,
             asn_tsv: None,
             location: None,
