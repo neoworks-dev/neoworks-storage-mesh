@@ -6,17 +6,20 @@
 
 mod test_nodes;
 
+use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use mesh_client::chunking::{AVERAGE_CHUNK_BYTES, MAX_CHUNK_BYTES, MIN_CHUNK_BYTES};
-use mesh_client::erasure::RebuildError;
+use mesh_client::erasure::{DATA_PIECES, RebuildError};
 use mesh_client::{DedupKey, DownloadError, Manifest, NodeClient, UploadError, upload};
 use mesh_node::NodeSettings;
 use test_nodes::{
-    TestNode, download_bytes, node_list, random_file, start_nodes, start_silent_node, store_on,
+    RequestGauge, TestNode, download_bytes, node_list, random_file, start_nodes, start_silent_node,
+    start_slow_proxy, store_on,
 };
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -84,6 +87,38 @@ async fn a_file_comes_back_unchanged() {
     );
     assert!(*last <= MAX_CHUNK_BYTES);
     assert_eq!(read_back(&manifest).await.unwrap(), file);
+}
+
+#[tokio::test]
+async fn chunks_are_fetched_side_by_side_and_written_in_order() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = sample_file();
+    let mut manifest = store(&nodes, &file).await.unwrap();
+    assert!(manifest.chunks.len() > 1);
+    // Every node answers only after a delay, so requests for different
+    // chunks overlap if the download sends them side by side.
+    let gauge = Arc::new(RequestGauge::default());
+    let mut proxies = HashMap::new();
+    for node in &nodes {
+        let proxy = start_slow_proxy(node.url.clone(), Duration::from_millis(300), gauge.clone());
+        proxies.insert(node.url.clone(), proxy.await);
+    }
+    for piece in manifest
+        .chunks
+        .iter_mut()
+        .flat_map(|chunk| &mut chunk.pieces)
+    {
+        piece.node = proxies[&piece.node].clone();
+    }
+
+    assert_eq!(read_back(&manifest).await.unwrap(), file);
+
+    // One chunk alone never asks more than four nodes at once.
+    assert!(
+        gauge.most() > DATA_PIECES,
+        "at most {} requests at once",
+        gauge.most()
+    );
 }
 
 #[tokio::test]

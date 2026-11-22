@@ -5,8 +5,13 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use axum::Router;
+use axum::http::{StatusCode, Uri};
+use axum::routing::get;
 use mesh_client::erasure::TOTAL_PIECES;
 use mesh_client::{
     ChunkRecord, DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece,
@@ -87,6 +92,43 @@ pub async fn start_silent_node() -> String {
             connections.push(socket);
         }
     });
+    url
+}
+
+/// Counts the requests a group of slow proxies holds at once.
+#[derive(Default)]
+pub struct RequestGauge {
+    now: AtomicUsize,
+    most: AtomicUsize,
+}
+
+impl RequestGauge {
+    /// The most requests that were held at the same moment.
+    pub fn most(&self) -> usize {
+        self.most.load(Ordering::SeqCst)
+    }
+}
+
+/// The URL of a proxy in front of the node at `target` that holds every GET
+/// for `delay` before forwarding it, counting held requests in `gauge`.
+pub async fn start_slow_proxy(target: String, delay: Duration, gauge: Arc<RequestGauge>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let forward = move |uri: Uri| {
+        let target = target.clone();
+        let gauge = gauge.clone();
+        async move {
+            let held = gauge.now.fetch_add(1, Ordering::SeqCst) + 1;
+            gauge.most.fetch_max(held, Ordering::SeqCst);
+            tokio::time::sleep(delay).await;
+            gauge.now.fetch_sub(1, Ordering::SeqCst);
+            let response = reqwest::get(format!("{target}{uri}")).await.unwrap();
+            let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+            (status, response.bytes().await.unwrap())
+        }
+    };
+    let app = Router::new().fallback(get(forward));
+    tokio::spawn(async move { axum::serve(listener, app).await });
     url
 }
 

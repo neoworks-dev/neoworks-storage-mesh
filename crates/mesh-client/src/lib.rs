@@ -53,7 +53,7 @@ mod upload;
 pub mod version_graph;
 
 pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHealth, audit};
-pub use download::{DownloadError, download};
+pub use download::{CHUNKS_IN_FLIGHT, DownloadError, download};
 pub use encryption::DedupKey;
 pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
 pub use node_client::{NodeClient, NodeRequestError, PointerStored};

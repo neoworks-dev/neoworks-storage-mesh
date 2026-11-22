@@ -1,17 +1,23 @@
 //! Getting a file back: fetch each chunk's pieces, rebuild, open, write.
+//! Several chunks are fetched at once, so a file uses many nodes in parallel.
 
 use std::time::Duration;
 
 use futures::StreamExt;
-use futures::stream::FuturesUnordered;
+use futures::stream::{self, FuturesUnordered};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::encryption::open;
 use crate::erasure::{DATA_PIECES, RebuildError, rebuild};
-use crate::manifest::{Manifest, PlacedPiece};
+use crate::manifest::{ChunkRecord, Manifest, PlacedPiece};
 use crate::node_client::NodeClient;
 use crate::node_latency::LatencyTable;
+
+/// How many chunks a download fetches at once. More chunks use more nodes at
+/// the same time; each one in flight holds up to 4 MiB of pieces and its
+/// opened bytes, so four keep a download within a few dozen MiB.
+pub const CHUNKS_IN_FLIGHT: usize = 4;
 
 /// How long to wait for any of the pieces asked for before asking one more
 /// node. A healthy node on a home connection answers within it, and it is
@@ -31,8 +37,9 @@ pub enum DownloadError {
     WrongSize { expected: u64, actual: u64 },
 }
 
-/// Reads the file `manifest` describes into `writer`, one chunk at a time, so
-/// the file never has to fit in memory.
+/// Reads the file `manifest` describes into `writer`, fetching up to
+/// [`CHUNKS_IN_FLIGHT`] chunks at once and writing them in order, so the file
+/// never has to fit in memory.
 ///
 /// A chunk survives as long as four of its six pieces can be fetched. Nodes
 /// that are down, have lost a piece or return wrong bytes all count the same:
@@ -45,18 +52,14 @@ pub async fn download(
     manifest: &Manifest,
     mut writer: impl AsyncWrite + Unpin,
 ) -> Result<(), DownloadError> {
+    // `buffered` runs the fetches side by side but yields them in chunk
+    // order, which is the order the file needs them in.
+    let mut chunks = stream::iter(manifest.chunks.iter().enumerate())
+        .map(|(index, chunk)| fetch_chunk(client, index, chunk))
+        .buffered(CHUNKS_IN_FLIGHT);
     let mut written = 0;
-    for (index, chunk) in manifest.chunks.iter().enumerate() {
-        // The manifest was written by `upload`, which numbers chunks with a u32.
-        let index = u32::try_from(index).expect("chunk indexes fit a u32");
-        let pieces = fetch_pieces(client, &chunk.pieces).await;
-        let sealed = rebuild(&pieces, chunk.sealed_len as usize)
-            .map_err(|source| DownloadError::Rebuild { index, source })?;
-        let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
-        // Chunks stored before padding was dropped open with zeros after
-        // their bytes; cutting to the recorded length drops them, and does
-        // nothing to newer chunks.
-        plaintext.truncate(chunk.plain_len as usize);
+    while let Some(plaintext) = chunks.next().await {
+        let plaintext = plaintext?;
         writer.write_all(&plaintext).await?;
         written += plaintext.len() as u64;
     }
@@ -70,6 +73,25 @@ pub async fn download(
         });
     }
     Ok(())
+}
+
+/// Fetches, rebuilds and opens chunk `index`, returning its bytes.
+async fn fetch_chunk(
+    client: &NodeClient,
+    index: usize,
+    chunk: &ChunkRecord,
+) -> Result<Vec<u8>, DownloadError> {
+    // The manifest was written by `upload`, which numbers chunks with a u32.
+    let index = u32::try_from(index).expect("chunk indexes fit a u32");
+    let pieces = fetch_pieces(client, &chunk.pieces).await;
+    let sealed = rebuild(&pieces, chunk.sealed_len as usize)
+        .map_err(|source| DownloadError::Rebuild { index, source })?;
+    let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
+    // Chunks stored before padding was dropped open with zeros after their
+    // bytes; cutting to the recorded length drops them, and does nothing to
+    // newer chunks.
+    plaintext.truncate(chunk.plain_len as usize);
+    Ok(plaintext)
 }
 
 /// Fetches the first [`DATA_PIECES`] valid pieces of a chunk; every other
