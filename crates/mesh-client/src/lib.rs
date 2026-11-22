@@ -34,6 +34,7 @@ mod download;
 pub mod encryption;
 pub mod erasure;
 mod manifest;
+pub mod merge;
 mod node_client;
 mod node_latency;
 mod node_list;

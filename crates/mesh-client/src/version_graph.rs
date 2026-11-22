@@ -54,6 +54,8 @@ pub enum Change {
         field: u32,
         value: serde_json::Value,
     },
+    /// Removes one field of an entry; an entry left without fields is gone.
+    Unset { entry: String, field: u32 },
     /// Removes an entry and all its fields.
     Remove { entry: String },
 }
@@ -164,10 +166,23 @@ pub fn apply(entries: &mut Entries, changes: &[Change]) {
                     .or_default()
                     .insert(*field, value.clone());
             }
+            Change::Unset { entry, field } => unset(entries, entry, *field),
             Change::Remove { entry } => {
                 entries.remove(entry);
             }
         }
+    }
+}
+
+/// Removes `field` from `entry`, and the entry once it has no fields left, so
+/// an entry with no fields and an absent entry are the same state.
+fn unset(entries: &mut Entries, entry: &str, field: u32) {
+    let Some(fields) = entries.get_mut(entry) else {
+        return;
+    };
+    fields.remove(&field);
+    if fields.is_empty() {
+        entries.remove(entry);
     }
 }
 
