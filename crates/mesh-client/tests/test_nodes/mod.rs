@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 use mesh_client::erasure::TOTAL_PIECES;
-use mesh_client::{ChunkRecord, NodeInfo, NodeList, PlacedPiece};
+use mesh_client::{
+    ChunkRecord, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece, download,
+};
 use mesh_node::{NodeSettings, PieceStore};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -70,6 +72,16 @@ pub async fn start_nodes(settings: NodeSettings) -> Vec<TestNode> {
 
 pub fn urls(nodes: &[TestNode]) -> Vec<String> {
     nodes.iter().map(|node| node.url.clone()).collect()
+}
+
+/// Downloads the file `manifest` describes into memory.
+pub async fn download_bytes(
+    client: &NodeClient,
+    manifest: &Manifest,
+) -> Result<Vec<u8>, DownloadError> {
+    let mut file = Vec::new();
+    download(client, manifest, &mut file).await?;
+    Ok(file)
 }
 
 /// The piece of `chunk` that lives on the node at `url`.

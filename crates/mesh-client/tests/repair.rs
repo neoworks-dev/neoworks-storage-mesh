@@ -7,11 +7,10 @@ mod test_nodes;
 use std::time::Duration;
 
 use mesh_client::{
-    AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth, audit, download,
-    repair, upload,
+    AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth, audit, repair, upload,
 };
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, node_list, position_on, start_nodes};
+use test_nodes::{TestNode, download_bytes, node_list, position_on, start_nodes};
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -28,7 +27,7 @@ async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let manifest = upload(
         &NodeClient::new().unwrap(),
         &node_list(&nodes),
-        &sample_file(),
+        sample_file().as_slice(),
         LEASE,
     )
     .await
@@ -115,7 +114,7 @@ async fn a_repaired_file_survives_two_more_losses() {
     nodes[2].stop();
     nodes[3].stop();
 
-    let file = download(&NodeClient::new().unwrap(), &manifest).await;
+    let file = download_bytes(&NodeClient::new().unwrap(), &manifest).await;
     assert_eq!(file.unwrap(), sample_file());
 }
 

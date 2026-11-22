@@ -11,9 +11,9 @@ use std::time::Duration;
 
 use mesh_client::erasure::RebuildError;
 use mesh_client::{DownloadError, NodeClient, UploadError};
-use mesh_client::{download, renew, upload};
+use mesh_client::{renew, upload};
 use mesh_node::NodeSettings;
-use test_nodes::{node_list, start_nodes};
+use test_nodes::{download_bytes, node_list, start_nodes};
 
 /// Nodes that sweep often, so expired pieces leave the disk within a test.
 fn quickly_sweeping() -> NodeSettings {
@@ -37,7 +37,7 @@ async fn an_unrenewed_file_expires_and_leaves_the_disk() {
     let manifest = upload(
         &client,
         &node_list(&nodes),
-        &sample_file(),
+        sample_file().as_slice(),
         Duration::from_secs(1),
     )
     .await
@@ -45,7 +45,7 @@ async fn an_unrenewed_file_expires_and_leaves_the_disk() {
 
     tokio::time::sleep(Duration::from_millis(2_500)).await;
 
-    let result = download(&client, &manifest).await;
+    let result = download_bytes(&client, &manifest).await;
     assert!(matches!(
         result,
         Err(DownloadError::Rebuild {
@@ -63,16 +63,21 @@ async fn a_renewed_file_outlives_its_first_lease() {
     let nodes = start_nodes(quickly_sweeping()).await;
     let client = NodeClient::new().unwrap();
     let file = sample_file();
-    let manifest = upload(&client, &node_list(&nodes), &file, Duration::from_secs(2))
-        .await
-        .unwrap();
+    let manifest = upload(
+        &client,
+        &node_list(&nodes),
+        file.as_slice(),
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
 
     let report = renew(&client, &manifest, Duration::from_secs(60)).await;
     tokio::time::sleep(Duration::from_millis(3_200)).await;
 
     assert_eq!(report.renewed, 18);
     assert!(report.not_renewed.is_empty());
-    assert_eq!(download(&client, &manifest).await.unwrap(), file);
+    assert_eq!(download_bytes(&client, &manifest).await.unwrap(), file);
 }
 
 #[tokio::test]
@@ -82,7 +87,7 @@ async fn renewing_reports_the_pieces_of_a_node_that_is_down() {
     let manifest = upload(
         &client,
         &node_list(&nodes),
-        &sample_file(),
+        sample_file().as_slice(),
         Duration::from_secs(60),
     )
     .await
@@ -117,7 +122,7 @@ async fn nodes_refuse_leases_longer_than_they_grant() {
     let result = upload(
         &NodeClient::new().unwrap(),
         &node_list(&nodes),
-        b"photo",
+        &b"photo"[..],
         Duration::from_secs(61),
     )
     .await;

@@ -95,8 +95,10 @@ async fn put(
     days: u64,
 ) -> anyhow::Result<()> {
     let list = NodeList::read(nodes_path)?;
-    let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let manifest = mesh_client::upload(client, &list, &bytes, days_to_duration(days)).await?;
+    let reader = tokio::fs::File::open(file)
+        .await
+        .with_context(|| format!("opening {}", file.display()))?;
+    let manifest = mesh_client::upload(client, &list, reader, days_to_duration(days)).await?;
     write_manifest(manifest_path, &manifest)?;
     println!(
         "stored {} bytes in {} chunks for {days} days, manifest in {}",
@@ -185,11 +187,24 @@ async fn repair(
     Ok(())
 }
 
+/// Downloads into a temporary file next to `output` and renames it once the
+/// whole file arrived, so a failed download never leaves half a file under
+/// the name asked for.
 async fn get(client: &NodeClient, manifest_path: &Path, output: &Path) -> anyhow::Result<()> {
     let manifest = read_manifest(manifest_path)?;
-    let bytes = mesh_client::download(client, &manifest).await?;
-    std::fs::write(output, &bytes).with_context(|| format!("writing {}", output.display()))?;
-    println!("read {} bytes into {}", bytes.len(), output.display());
+    let temporary_path = output.with_extension("partial");
+    let writer = tokio::fs::File::create(&temporary_path)
+        .await
+        .with_context(|| format!("creating {}", temporary_path.display()))?;
+    if let Err(error) = mesh_client::download(client, &manifest, writer).await {
+        // The partial file is useless and may be large; its removal failing
+        // only leaves it behind.
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error.into());
+    }
+    std::fs::rename(&temporary_path, output)
+        .with_context(|| format!("replacing {}", output.display()))?;
+    println!("read {} bytes into {}", manifest.size, output.display());
     Ok(())
 }
 

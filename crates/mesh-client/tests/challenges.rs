@@ -24,7 +24,7 @@ async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let manifest = upload(
         &NodeClient::new().unwrap(),
         &node_list(&nodes),
-        &sample_file(),
+        sample_file().as_slice(),
         LEASE,
     )
     .await

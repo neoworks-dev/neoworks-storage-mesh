@@ -8,12 +8,15 @@ mod test_nodes;
 
 use std::time::Duration;
 
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use mesh_client::erasure::RebuildError;
-use mesh_client::{
-    CHUNK_BYTES, DownloadError, Manifest, NodeClient, UploadError, download, upload,
-};
+use mesh_client::{CHUNK_BYTES, DownloadError, Manifest, NodeClient, UploadError, upload};
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, node_list, start_nodes};
+use test_nodes::{TestNode, download_bytes, node_list, start_nodes};
+use tokio::io::{AsyncRead, ReadBuf};
 
 /// Long enough that no piece expires while a test runs.
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -33,7 +36,33 @@ async fn store(nodes: &[TestNode], file: &[u8]) -> Result<Manifest, UploadError>
 
 /// Reads with a new client, so no connection opened during the upload is reused.
 async fn read_back(manifest: &Manifest) -> Result<Vec<u8>, DownloadError> {
-    download(&NodeClient::new().unwrap(), manifest).await
+    download_bytes(&NodeClient::new().unwrap(), manifest).await
+}
+
+/// A reader that hands out at most 777 bytes per read, the way a network
+/// stream or a pipe does, and then optionally fails.
+struct TrickleReader {
+    data: Vec<u8>,
+    position: usize,
+    fail_at_end: bool,
+}
+
+impl AsyncRead for TrickleReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let remaining = self.data.len() - self.position;
+        if remaining == 0 && self.fail_at_end {
+            return Poll::Ready(Err(io::Error::other("the disk went away")));
+        }
+        let count = remaining.min(777).min(buffer.remaining());
+        let start = self.position;
+        buffer.put_slice(&self.data[start..start + count]);
+        self.position += count;
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[tokio::test]
@@ -116,6 +145,50 @@ async fn an_empty_file_comes_back_empty() {
 
     assert!(manifest.chunks.is_empty());
     assert_eq!(read_back(&manifest).await.unwrap(), Vec::<u8>::new());
+}
+
+#[tokio::test]
+async fn a_file_read_in_small_pieces_is_still_cut_into_whole_chunks() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = sample_file();
+    let reader = TrickleReader {
+        data: file.clone(),
+        position: 0,
+        fail_at_end: false,
+    };
+
+    let manifest = upload(
+        &NodeClient::new().unwrap(),
+        &node_list(&nodes),
+        reader,
+        LEASE,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manifest.chunks.len(), 3);
+    assert_eq!(manifest.size, file.len() as u64);
+    assert_eq!(read_back(&manifest).await.unwrap(), file);
+}
+
+#[tokio::test]
+async fn a_failing_reader_fails_the_upload() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let reader = TrickleReader {
+        data: sample_file(),
+        position: 0,
+        fail_at_end: true,
+    };
+
+    let result = upload(
+        &NodeClient::new().unwrap(),
+        &node_list(&nodes),
+        reader,
+        LEASE,
+    )
+    .await;
+
+    assert!(matches!(result, Err(UploadError::Read(_))));
 }
 
 #[tokio::test]
