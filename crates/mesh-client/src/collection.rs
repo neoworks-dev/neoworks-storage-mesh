@@ -22,9 +22,11 @@
 
 use std::time::Duration;
 
+use mesh_core::node_list::CoordinatorList;
 use mesh_core::pointer::SigningKey;
 use serde::{Deserialize, Serialize};
 
+use crate::chunk_registration::{RegisterError, register};
 use crate::commits::{
     FetchCommitError, PublishHeadError, ReadHeadError, fetch_new, publish_head, read_head,
     store_commit,
@@ -111,6 +113,9 @@ pub struct Writer<'a> {
     pub device: String,
     /// How long commits and the pointer are stored.
     pub lease: Duration,
+    /// The coordinators to register commits with, so they repair them while
+    /// the writer's devices are off; `None` for none.
+    pub coordinators: Option<&'a CoordinatorList>,
 }
 
 /// Why a collection could not be read or saved.
@@ -128,6 +133,8 @@ pub enum CollectionError {
     Missing(#[from] MissingCommit),
     #[error("other writers kept moving the pointer; try again")]
     Contended,
+    #[error("registering a commit for repair: {0}")]
+    Register(#[from] RegisterError),
 }
 
 /// A collection as this device knows it: the graph, its head, and the newest
@@ -302,7 +309,12 @@ impl Collection {
         }
     }
 
-    /// Stores `commit`, adds it to the graph and returns its reference.
+    /// Stores `commit`, registers it for repair, adds it to the graph and
+    /// returns its reference.
+    ///
+    /// Registering comes before the pointer names the commit, so a failed
+    /// registration leaves nothing published that the coordinator doesn't
+    /// look after.
     async fn store(
         &mut self,
         writer: &Writer<'_>,
@@ -316,6 +328,10 @@ impl Collection {
             writer.lease,
         )
         .await?;
+        if let Some(coordinators) = writer.coordinators {
+            let expires_at = unix_now() + writer.lease.as_secs();
+            register(writer.client, coordinators, &reference.manifest, expires_at).await?;
+        }
         self.graph.insert(reference.id, commit);
         Ok(reference)
     }

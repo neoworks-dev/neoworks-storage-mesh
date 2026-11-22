@@ -15,7 +15,7 @@ use mesh_client::tokens::get_tokens;
 use mesh_client::{NodeClient, NodeRequestError, upload};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::PieceId;
-use mesh_core::node_list::{CoordinatorList, NodeSnapshot};
+use mesh_core::node_list::{CoordinatorList, ListedCoordinator, NodeSnapshot};
 use mesh_core::sign_in::KdfParams;
 use mesh_core::signed::Signed;
 use mesh_core::tokens::{Token, TokenKind};
@@ -46,9 +46,14 @@ async fn start_with_account() -> (
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
     data.credit("ana@example.org", 20).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: coordinator.clone(),
+        }],
     };
     // Fast rounds, so the nodes are measured, listed and priced at once.
     let settings = CoordinatorSettings {
@@ -57,8 +62,6 @@ async fn start_with_account() -> (
         speed_test_interval: Duration::from_millis(100),
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     let nodes = start_nodes(NodeSettings {
         require_tokens: Some(coordinator.clone()),
@@ -211,6 +214,7 @@ async fn an_account_renews_through_tabs_paid_from_its_wallet() {
         account: &account,
         device: "laptop".into(),
         lease: LEASE,
+        coordinators: None,
     };
     // Storing pays this month's tabs, one token per node.
     let node_urls = urls(&nodes);

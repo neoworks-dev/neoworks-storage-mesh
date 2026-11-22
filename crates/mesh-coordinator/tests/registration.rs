@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::NodeId;
 use mesh_core::earnings::{OPERATOR_ROUTE, OperatorClaim};
-use mesh_core::node_list::{CoordinatorList, NodeSnapshot};
+use mesh_core::node_list::{CoordinatorList, ListedCoordinator, NodeSnapshot};
 use mesh_core::prices::{DAY_SECONDS, PriceTable};
 use mesh_core::signed::{Signed, SigningKey};
 use mesh_node::{NodeData, NodeSettings, Registration, RegistrationError, register};
@@ -19,9 +19,14 @@ use tokio::net::TcpListener;
 async fn start_coordinator() -> (TempDir, String, CoordinatorList) {
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: url.clone(),
+        }],
     };
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_millis(100),
@@ -29,8 +34,6 @@ async fn start_coordinator() -> (TempDir, String, CoordinatorList) {
         probe_interval: Duration::from_millis(100),
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     (directory, url, coordinators)
 }

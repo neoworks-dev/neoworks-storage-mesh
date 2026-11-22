@@ -17,10 +17,17 @@
 //!
 //! The index also holds the account's wallet ([`crate::wallet`]): the tokens
 //! that pay nodes which require them, one entry per token.
+//!
+//! With a coordinator list, every file and commit stored through the index
+//! is registered for repair with the coordinators responsible for its
+//! chunks, and renewing registers them again until the new date. Reading the
+//! index takes in where the coordinators moved pieces and saves the files'
+//! manifests with them, so every device sees the moves.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use mesh_core::node_list::CoordinatorList;
 use mesh_core::tokens::{MONTH_SECONDS, Token};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,6 +36,9 @@ pub use crate::collection::unix_now;
 
 use crate::account::Account;
 use crate::batch_renew::{BatchRenewal, renew_pieces};
+use crate::chunk_registration::{
+    RegisterError, registration_of, send_registrations, take_new_locations,
+};
 use crate::collection::{Collection, CollectionError, CollectionKeys, Writer};
 use crate::commits::{FetchCommitError, PublishHeadError, ReadHeadError};
 use crate::manifest::Manifest;
@@ -78,6 +88,9 @@ pub struct Session<'a> {
     pub device: String,
     /// How long commits and the pointer are stored.
     pub lease: Duration,
+    /// The coordinators that repair the account's files and commits while
+    /// its devices are off; `None` for none.
+    pub coordinators: Option<&'a CoordinatorList>,
 }
 
 impl Session<'_> {
@@ -98,6 +111,7 @@ impl Session<'_> {
             dedup_key: self.account.dedup_key(),
             device: self.device.clone(),
             lease: self.lease,
+            coordinators: self.coordinators,
         }
     }
 }
@@ -121,6 +135,8 @@ pub enum IndexError {
     Contended,
     #[error("the index already has a collection called {0}")]
     CollectionExists(String),
+    #[error("registering chunks for repair: {0}")]
+    Register(#[from] RegisterError),
 }
 
 impl From<CollectionError> for IndexError {
@@ -132,6 +148,7 @@ impl From<CollectionError> for IndexError {
             CollectionError::PublishHead(error) => IndexError::PublishHead(error),
             CollectionError::Missing(error) => IndexError::Missing(error),
             CollectionError::Contended => IndexError::Contended,
+            CollectionError::Register(error) => IndexError::Register(error),
         }
     }
 }
@@ -163,8 +180,9 @@ impl Index {
         Ok(Some(to_file(name, fields)?))
     }
 
-    /// Adds or replaces the file `name`, whose leases end at `renew_by`, and
-    /// saves the index.
+    /// Registers the file `name`, whose leases end at `renew_by`, for repair
+    /// with the session's coordinators, then adds or replaces it in the index
+    /// and saves the index.
     pub async fn add_file(
         &mut self,
         session: &Session<'_>,
@@ -172,10 +190,9 @@ impl Index {
         manifest: &Manifest,
         renew_by: u64,
     ) -> Result<(), IndexError> {
-        // A manifest is plain strings and numbers, which always serialize.
-        let manifest_json = serde_json::to_value(manifest).expect("a manifest serializes");
+        register_all(session, [manifest], renew_by).await?;
         let changes = vec![
-            set(name, FIELD_MANIFEST, manifest_json),
+            set(name, FIELD_MANIFEST, manifest_value(manifest)),
             set(name, FIELD_SIZE, json!(manifest.size)),
             set(name, FIELD_RENEW_BY, json!(renew_by)),
         ];
@@ -272,6 +289,9 @@ impl Index {
     /// All pieces go out in one request per node, however many files there
     /// are. The index's commits are renewed with them; letting those expire
     /// would lose the list of files while the files themselves live on.
+    ///
+    /// With coordinators, the renewed files and commits are registered again
+    /// until the new date, so they keep repairing them.
     pub async fn renew(&mut self, session: &Session<'_>) -> Result<IndexRenewal, IndexError> {
         self.renew_with_collections(session, &mut BTreeMap::new())
             .await
@@ -321,6 +341,13 @@ impl Index {
             commit_manifests.extend(collection.commit_manifests()?);
             kept.push((keys, collection));
         }
+        // Commits can't be changed to name new nodes, since their ids are
+        // their hashes, so their moved pieces are only taken in here. Without
+        // this, renewing would miss those pieces, and registering the old
+        // nodes would undo the coordinator's repair.
+        for manifest in &mut commit_manifests {
+            take_moved_pieces(session, manifest).await?;
+        }
         let manifests: Vec<&Manifest> = files
             .iter()
             .map(|file| &file.manifest)
@@ -343,6 +370,11 @@ impl Index {
         let (safe, at_risk): (Vec<IndexedFile>, Vec<IndexedFile>) = files
             .into_iter()
             .partition(|file| is_readable(&file.manifest, &renewal));
+        let renewed_manifests = safe
+            .iter()
+            .map(|file| &file.manifest)
+            .chain(&commit_manifests);
+        register_all(session, renewed_manifests, renewed_until).await?;
         changes.extend(
             safe.iter()
                 .map(|file| set(&file.name, FIELD_RENEW_BY, json!(renewed_until))),
@@ -398,8 +430,26 @@ impl Index {
 
     /// Brings this device's index up to date with the account's pointer,
     /// merging when both sides saved something the other lacks.
+    ///
+    /// With coordinators, it then takes in where they moved the files'
+    /// pieces in repair and saves those manifests, so every device
+    /// finds the pieces where they are now.
     pub async fn pull(&mut self, session: &Session<'_>) -> Result<(), IndexError> {
-        Ok(self.collection.pull(&session.writer()).await?)
+        self.collection.pull(&session.writer()).await?;
+        let mut changes = Vec::new();
+        for mut file in self.files()? {
+            if take_moved_pieces(session, &mut file.manifest).await? > 0 {
+                changes.push(set(
+                    &file.name,
+                    FIELD_MANIFEST,
+                    manifest_value(&file.manifest),
+                ));
+            }
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
+        self.save(session, changes).await
     }
 
     /// Commits `changes` on top of this device's head and moves the
@@ -442,6 +492,43 @@ fn is_readable(manifest: &Manifest, renewal: &BatchRenewal) -> bool {
             .count();
         renewed >= chunk.layout.data()
     })
+}
+
+/// Registers every chunk of `manifests` until `expires_at` with the
+/// session's coordinators, if it has any.
+async fn register_all<'m>(
+    session: &Session<'_>,
+    manifests: impl IntoIterator<Item = &'m Manifest>,
+    expires_at: u64,
+) -> Result<(), RegisterError> {
+    let Some(coordinators) = session.coordinators else {
+        return Ok(());
+    };
+    let registrations = manifests
+        .into_iter()
+        .flat_map(|manifest| &manifest.chunks)
+        .map(|chunk| registration_of(chunk, expires_at))
+        .collect();
+    send_registrations(session.client, coordinators, registrations).await?;
+    Ok(())
+}
+
+/// Moves the pieces of `manifest` that the session's coordinators, if it
+/// has any, moved in repair, and returns how many moved.
+async fn take_moved_pieces(
+    session: &Session<'_>,
+    manifest: &mut Manifest,
+) -> Result<usize, RegisterError> {
+    let Some(coordinators) = session.coordinators else {
+        return Ok(0);
+    };
+    take_new_locations(session.client, coordinators, manifest).await
+}
+
+/// A manifest as an entry's field.
+fn manifest_value(manifest: &Manifest) -> Value {
+    // A manifest is plain strings and numbers, which always serialize.
+    serde_json::to_value(manifest).expect("a manifest serializes")
 }
 
 fn set(entry: &str, field: u32, value: Value) -> Change {

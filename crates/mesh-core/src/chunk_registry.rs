@@ -15,7 +15,9 @@
 //! renewal, must carry the same secret.
 //!
 //! Each chunk belongs to one coordinator ([`responsible_coordinator`]), so
-//! two coordinators never repair the same chunk.
+//! two coordinators never repair the same chunk. Clients send each chunk's
+//! registration to, and ask its locations at, that coordinator's URL on the
+//! coordinator list.
 //!
 //! - `POST /chunks` with a [`RegisterChunks`] registers or updates chunks
 //!   and answers with a [`RegisterChunksResponse`].
@@ -25,7 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::layout::Layout;
-use crate::node_list::{CoordinatorKey, CoordinatorList};
+use crate::node_list::{CoordinatorList, ListedCoordinator};
 use crate::{NodeId, PieceId};
 
 /// The route chunks are registered at.
@@ -58,14 +60,17 @@ pub fn chunk_id<'a>(piece_ids: impl IntoIterator<Item = &'a PieceId>) -> [u8; 32
 /// with the same list picks the same one, and when a coordinator joins or
 /// leaves, only the chunks it wins or held move; the rest stay where they
 /// are.
-pub fn responsible_coordinator(
+///
+/// Only keys are scored, so a coordinator moving to another URL keeps its
+/// chunks.
+pub fn responsible_coordinator<'list>(
     id: &[u8; 32],
-    coordinators: &CoordinatorList,
-) -> Option<CoordinatorKey> {
-    coordinators.keys.iter().copied().max_by_key(|key| {
+    coordinators: &'list CoordinatorList,
+) -> Option<&'list ListedCoordinator> {
+    coordinators.coordinators.iter().max_by_key(|coordinator| {
         let mut hasher = blake3::Hasher::new_derive_key("neoworks-mesh chunk owner v1");
         hasher.update(id);
-        hasher.update(&key.0);
+        hasher.update(&coordinator.key.0);
         *hasher.finalize().as_bytes()
     })
 }
@@ -120,12 +125,29 @@ pub struct ChunkLocations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node_list::CoordinatorKey;
 
     fn list_of(count: u8) -> CoordinatorList {
         CoordinatorList {
             version: 1,
-            keys: (0..count).map(|byte| CoordinatorKey([byte; 32])).collect(),
+            coordinators: (0..count)
+                .map(|byte| ListedCoordinator {
+                    key: CoordinatorKey([byte; 32]),
+                    url: format!("https://coordinator-{byte}.example.org"),
+                })
+                .collect(),
         }
+    }
+
+    /// The key of the coordinator responsible for `id` on `list`.
+    fn owner(id: &[u8; 32], list: &CoordinatorList) -> Option<CoordinatorKey> {
+        responsible_coordinator(id, list).map(|coordinator| coordinator.key)
+    }
+
+    fn ids() -> Vec<[u8; 32]> {
+        (0..1000u32)
+            .map(|number| *blake3::hash(&number.to_be_bytes()).as_bytes())
+            .collect()
     }
 
     #[test]
@@ -142,21 +164,30 @@ mod tests {
     fn chunks_spread_over_coordinators_and_mostly_stay_when_one_joins() {
         let three = list_of(3);
         let four = list_of(4);
-        let ids: Vec<[u8; 32]> = (0..1000u32)
-            .map(|number| *blake3::hash(&number.to_be_bytes()).as_bytes())
-            .collect();
+        let ids = ids();
 
         let moved = ids
             .iter()
-            .filter(|id| responsible_coordinator(id, &three) != responsible_coordinator(id, &four))
+            .filter(|id| owner(id, &three) != owner(id, &four))
             .count();
         let on_first = ids
             .iter()
-            .filter(|id| responsible_coordinator(id, &three) == Some(CoordinatorKey([0; 32])))
+            .filter(|id| owner(id, &three) == Some(CoordinatorKey([0; 32])))
             .count();
 
         // A fourth coordinator takes about a quarter, all from the others.
         assert!((150..350).contains(&moved), "{moved}");
         assert!((250..420).contains(&on_first), "{on_first}");
+    }
+
+    #[test]
+    fn a_coordinator_that_moves_keeps_its_chunks() {
+        let before = list_of(3);
+        let mut after = before.clone();
+        after.coordinators[0].url = "https://elsewhere.example.org".into();
+
+        for id in ids() {
+            assert_eq!(owner(&id, &before), owner(&id, &after));
+        }
     }
 }
