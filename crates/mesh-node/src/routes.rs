@@ -14,9 +14,10 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use mesh_core::pointer::{Pointer, parse_owner};
 use mesh_core::protocol::{
-    CHALLENGE_ROUTE, ChallengeRequest, ChallengeResponse, IDENTITY_ROUTE, LEASE_ROUTE, LeaseQuery,
-    LeaseResponse, MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, NodeIdentity, PIECE_ROUTE,
-    POINTER_ROUTE, PointerConflict,
+    BATCH_LEASE_ROUTE, BatchRenewRequest, BatchRenewResponse, CHALLENGE_ROUTE, ChallengeRequest,
+    ChallengeResponse, IDENTITY_ROUTE, LEASE_ROUTE, LeaseQuery, LeaseResponse, MAX_BATCH_PIECES,
+    MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, NodeIdentity, PIECE_ROUTE, POINTER_ROUTE,
+    PointerConflict,
 };
 use mesh_core::{PieceId, merkle};
 
@@ -54,6 +55,7 @@ pub fn router(
     Router::new()
         .route(PIECE_ROUTE, put(put_piece).get(get_piece))
         .route(LEASE_ROUTE, post(renew_lease))
+        .route(BATCH_LEASE_ROUTE, post(renew_leases))
         .route(CHALLENGE_ROUTE, post(answer_challenge))
         .route(POINTER_ROUTE, put(put_pointer).get(get_pointer))
         .route(IDENTITY_ROUTE, get(get_identity))
@@ -103,6 +105,31 @@ async fn renew_lease(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => internal_error(&id, error),
     }
+}
+
+/// `POST /leases?lease_seconds=N`: renews every piece in the body.
+async fn renew_leases(
+    State(node): State<Node>,
+    Query(query): Query<LeaseQuery>,
+    Json(request): Json<BatchRenewRequest>,
+) -> Response {
+    if request.pieces.len() > MAX_BATCH_PIECES {
+        let reason = format!("a batch renews at most {MAX_BATCH_PIECES} pieces");
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    let expires_at = match lease_end(&node, &query) {
+        Ok(expires_at) => expires_at,
+        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+    };
+    let now = unix_now();
+    let mut lease_ends = Vec::with_capacity(request.pieces.len());
+    for id in &request.pieces {
+        match node.store.renew(id, expires_at, now).await {
+            Ok(lease_end) => lease_ends.push(lease_end),
+            Err(error) => return internal_error(id, error),
+        }
+    }
+    Json(BatchRenewResponse { lease_ends }).into_response()
 }
 
 /// `GET /pieces/{id}`: the bytes of the piece `id`, or `404 Not Found`.

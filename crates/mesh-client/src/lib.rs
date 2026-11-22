@@ -29,6 +29,7 @@
 
 pub mod account;
 mod audit;
+pub mod batch_renew;
 pub mod chunking;
 pub mod commits;
 mod download;

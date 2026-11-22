@@ -11,8 +11,9 @@ use mesh_core::PieceId;
 use mesh_core::merkle::SegmentProof;
 use mesh_core::pointer::Pointer;
 use mesh_core::protocol::{
-    ChallengeRequest, ChallengeResponse, IDENTITY_ROUTE, LeaseResponse, NodeIdentity,
-    PointerConflict, challenge_path, lease_path, piece_path, pointer_path,
+    BATCH_LEASE_ROUTE, BatchRenewRequest, BatchRenewResponse, ChallengeRequest, ChallengeResponse,
+    IDENTITY_ROUTE, LeaseResponse, NodeIdentity, PointerConflict, challenge_path, lease_path,
+    piece_path, pointer_path,
 };
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
@@ -98,6 +99,43 @@ impl NodeClient {
             http,
             latencies: Arc::default(),
         })
+    }
+
+    /// Renews the leases of `ids` on `node` to end no sooner than `lease` from
+    /// now. Returns, in order, when each ends, or `None` for a piece the node
+    /// does not hold. At most
+    /// [`MAX_BATCH_PIECES`](mesh_core::protocol::MAX_BATCH_PIECES) at a time.
+    pub async fn renew_many(
+        &self,
+        node: &str,
+        ids: &[PieceId],
+        lease: Duration,
+    ) -> Result<Vec<Option<u64>>, NodeRequestError> {
+        let url = with_lease(node_url(node, BATCH_LEASE_ROUTE), lease);
+        let request = BatchRenewRequest {
+            pieces: ids.to_vec(),
+        };
+        // A list of piece ids always serializes.
+        let body = serde_json::to_vec(&request).expect("a batch serializes");
+        let response = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let answer: BatchRenewResponse = read_json(node, response).await?;
+        // A node answering for other pieces than asked can't be matched up.
+        if answer.lease_ends.len() != ids.len() {
+            return Err(NodeRequestError::UnexpectedAnswer {
+                node: node.to_string(),
+            });
+        }
+        Ok(answer.lease_ends)
     }
 
     /// Stores `pointer` on `node` for `lease`.

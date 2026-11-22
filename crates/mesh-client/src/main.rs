@@ -90,6 +90,12 @@ enum Command {
         #[command(flatten)]
         account: AccountArguments,
     },
+    /// Renews everything the account keeps, one request per node; meant to
+    /// run from a timer, such as weekly.
+    RenewAll {
+        #[command(flatten)]
+        account: AccountArguments,
+    },
     /// Reads a file from the account's index back.
     Fetch {
         name: String,
@@ -154,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
             account,
         } => account_commands::store(&client, &file, name, &account).await,
         Command::Ls { account } => account_commands::list_files(&client, &account).await,
+        Command::RenewAll { account } => account_commands::renew_all(&client, &account).await,
         Command::Fetch {
             name,
             output,

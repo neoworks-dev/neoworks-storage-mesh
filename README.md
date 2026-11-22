@@ -136,6 +136,10 @@ target/release/mesh ls $N --index other-device.json
 target/release/mesh fetch photo.jpg photo-again.jpg $N --index other-device.json
 ```
 
+To keep everything stored, run `mesh renew-all $N` from a timer, for
+example weekly. It renews every file, the index and its pointer with one
+request per node, and warns about files that lost too many pieces.
+
 `account.key` holds the secret: keep it private, since it opens every file
 of the account. `mesh-index.json` is this device's copy of the index;
 `--index` names another, as a second device would have.

@@ -12,6 +12,8 @@
 //!   `id`, and leases longer than it grants.
 //! - `POST /pieces/{id}/lease?lease_seconds=N` renews the lease to end no
 //!   sooner than `N` seconds from now, or answers `404 Not Found`.
+//! - `POST /leases?lease_seconds=N` with a [`BatchRenewRequest`] renews many
+//!   pieces at once and answers with a [`BatchRenewResponse`].
 //! - `GET /pieces/{id}` returns the bytes, or `404 Not Found`.
 //! - `POST /pieces/{id}/challenge` with a [`ChallengeRequest`] returns a
 //!   [`ChallengeResponse`]: the segments asked for, each with its Merkle
@@ -102,6 +104,29 @@ pub fn lease_path(id: &PieceId) -> String {
 /// The path of a storage challenge for the piece `id`.
 pub fn challenge_path(id: &PieceId) -> String {
     format!("/pieces/{id}/challenge")
+}
+
+/// The route that renews many pieces at once: `POST /leases?lease_seconds=N`
+/// with a [`BatchRenewRequest`] answers with a [`BatchRenewResponse`]. One
+/// request per node replaces one per piece, which for a terabyte is millions
+/// of requests a month.
+pub const BATCH_LEASE_ROUTE: &str = "/leases";
+
+/// The most pieces one batch may name. It keeps a request below a megabyte
+/// and a node's answer quick; clients split larger renewals.
+pub const MAX_BATCH_PIECES: usize = 4096;
+
+/// The pieces a batch renewal asks for.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchRenewRequest {
+    pub pieces: Vec<PieceId>,
+}
+
+/// The answer to a batch renewal: for each piece, in the order asked, when
+/// its lease ends now, or `None` when the node does not hold it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchRenewResponse {
+    pub lease_ends: Vec<Option<u64>>,
 }
 
 /// The route of a pointer, in the router syntax of `axum`.

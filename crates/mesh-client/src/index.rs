@@ -20,10 +20,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::account::Account;
+use crate::batch_renew::{BatchRenewal, renew_pieces};
 use crate::commits::{
     FetchCommitError, PublishHeadError, ReadHeadError, fetch_new, publish_head, read_head,
     store_commit,
 };
+use crate::erasure::DATA_PIECES;
 use crate::manifest::Manifest;
 use crate::merge::{MergeOutcome, merge};
 use crate::node_client::NodeClient;
@@ -141,6 +143,58 @@ impl Index {
             entry: name.to_string(),
         }];
         self.save(session, changes).await
+    }
+
+    /// Renews everything the account keeps for `session.lease`: every file's
+    /// pieces, the index's own commits, and its pointer. Files whose pieces
+    /// all held get the new renewal date.
+    ///
+    /// All pieces go out in one request per node, however many files there
+    /// are. The index's commits are renewed with them; letting those expire
+    /// would lose the list of files while the files themselves live on.
+    pub async fn renew(&mut self, session: &Session<'_>) -> Result<IndexRenewal, IndexError> {
+        self.pull(session).await?;
+        let files = self.files()?;
+        let commit_manifests = self.commit_manifests()?;
+        let renewed_until = unix_now() + session.lease.as_secs();
+        let pieces = files
+            .iter()
+            .map(|file| &file.manifest)
+            .chain(&commit_manifests)
+            .flat_map(|manifest| &manifest.chunks)
+            .flat_map(|chunk| &chunk.pieces);
+        let renewal = renew_pieces(session.client, pieces, session.lease).await;
+        let (safe, at_risk): (Vec<IndexedFile>, Vec<IndexedFile>) = files
+            .into_iter()
+            .partition(|file| is_readable(&file.manifest, &renewal));
+        let changes: Vec<Change> = safe
+            .iter()
+            .map(|file| set(&file.name, FIELD_RENEW_BY, json!(renewed_until)))
+            .collect();
+        // Saving writes the pointer anew, which renews it too.
+        if changes.is_empty() {
+            self.publish(session).await?;
+        } else {
+            self.save(session, changes).await?;
+        }
+        Ok(IndexRenewal {
+            pieces_renewed: renewal.renewed.len(),
+            pieces_not_renewed: renewal.not_renewed.len(),
+            at_risk,
+        })
+    }
+
+    /// The manifests of every commit in the index's history.
+    fn commit_manifests(&self) -> Result<Vec<Manifest>, IndexError> {
+        let Some(head) = &self.head else {
+            return Ok(Vec::new());
+        };
+        let mut manifests = vec![head.manifest.clone()];
+        for id in self.graph.history(&head.id)? {
+            let commit = self.graph.get(&id).ok_or(MissingCommit(id))?;
+            manifests.extend(commit.parents.iter().map(|parent| parent.manifest.clone()));
+        }
+        Ok(manifests)
     }
 
     /// Brings this device's index up to date with the account's pointer,
@@ -286,6 +340,27 @@ impl Index {
             None => Ok(Entries::new()),
         }
     }
+}
+
+/// What renewing the index achieved.
+pub struct IndexRenewal {
+    pub pieces_renewed: usize,
+    pub pieces_not_renewed: usize,
+    /// Files with a chunk that has fewer than four renewed pieces. They are
+    /// unreadable from their old `renew_by` on unless repaired first.
+    pub at_risk: Vec<IndexedFile>,
+}
+
+/// Whether every chunk of `manifest` has enough renewed pieces to rebuild it.
+fn is_readable(manifest: &Manifest, renewal: &BatchRenewal) -> bool {
+    manifest.chunks.iter().all(|chunk| {
+        let renewed = chunk
+            .pieces
+            .iter()
+            .filter(|piece| renewal.is_renewed(piece))
+            .count();
+        renewed >= DATA_PIECES
+    })
 }
 
 fn set(entry: &str, field: u32, value: Value) -> Change {

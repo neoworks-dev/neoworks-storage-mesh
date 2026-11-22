@@ -1,5 +1,5 @@
 //! The `mesh` commands that work through an account's index instead of
-//! manifest files: `account-new`, `store`, `ls` and `fetch`.
+//! manifest files: `account-new`, `store`, `ls`, `fetch` and `renew-all`.
 //!
 //! The account's secret lives in a file, and this device's copy of the index
 //! in another, so that only what changed since the last run is fetched.
@@ -119,6 +119,36 @@ pub async fn fetch(
         anyhow::bail!("the index has no file called {name}");
     };
     download_to(client, &file.manifest, output).await
+}
+
+/// Renews every file of the account, the index's history and its pointer,
+/// and warns about files that will become unreadable.
+pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> anyhow::Result<()> {
+    let account = read_account(&arguments.account)?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let session = Session {
+        client,
+        list: &list,
+        account: &account,
+        device: arguments.device.clone(),
+        lease: days_to_duration(arguments.days),
+    };
+    let mut index = read_index(&arguments.index)?;
+    let renewal = index.renew(&session).await?;
+    write_index(&arguments.index, &index)?;
+    println!(
+        "renewed {} pieces for {} days, {} not renewed",
+        renewal.pieces_renewed, arguments.days, renewal.pieces_not_renewed
+    );
+    let now = unix_now();
+    for file in &renewal.at_risk {
+        let hours_left = file.renew_by.saturating_sub(now) / 3600;
+        println!(
+            "warning: {} lost too many pieces and is unreadable in {hours_left} hours unless repaired",
+            file.name
+        );
+    }
+    Ok(())
 }
 
 /// This device's index, brought up to date and saved.
