@@ -1,5 +1,6 @@
 //! Records signed with an Ed25519 key: what nodes say about themselves, the
-//! node list a coordinator publishes, and the list of coordinators.
+//! node list a coordinator publishes, and the list of coordinators, which
+//! needs several coordinators' signatures ([`MultiSigned`]).
 //!
 //! The signature covers:
 //!
@@ -65,17 +66,72 @@ impl<T: SignedBody> Signed<T> {
 
     /// Checks that the signer signed exactly this body.
     pub fn verify(&self) -> Result<(), SignatureError> {
-        let signer =
-            VerifyingKey::from_bytes(&self.signer).map_err(|_| SignatureError::InvalidSigner)?;
-        // Strict verification also rejects weak keys and signatures altered
-        // into a second valid encoding.
-        signer
-            .verify_strict(
-                &signed_message(&self.body),
-                &Signature::from_bytes(&self.signature),
-            )
-            .map_err(|_| SignatureError::BadSignature)
+        verifies(&self.signer, &signed_message(&self.body), &self.signature)
     }
+}
+
+/// A body signed by several keys, for decisions that need more than one
+/// signer to agree, such as changing the coordinator list.
+///
+/// Each signature covers the same bytes a [`Signed`] one would. Like
+/// [`Signed`], it says nothing about whether the signers are anyone to trust.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound = "T: SignedBody")]
+pub struct MultiSigned<T: SignedBody> {
+    pub body: T,
+    pub signatures: Vec<Cosignature>,
+}
+
+/// One of the signatures on a [`MultiSigned`] body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cosignature {
+    /// The signer's Ed25519 public key.
+    #[serde(with = "hex")]
+    pub signer: [u8; 32],
+    #[serde(with = "hex")]
+    pub signature: [u8; 64],
+}
+
+impl<T: SignedBody> MultiSigned<T> {
+    /// `body`, signed with each of `keys`.
+    pub fn sign(keys: &[&SigningKey], body: T) -> Self {
+        let message = signed_message(&body);
+        let signatures = keys
+            .iter()
+            .map(|key| Cosignature {
+                signer: key.verifying_key().to_bytes(),
+                signature: key.sign(&message).to_bytes(),
+            })
+            .collect();
+        MultiSigned { body, signatures }
+    }
+
+    /// The keys whose signature over exactly this body holds, each once.
+    /// Signatures that do not hold are left out rather than failing the
+    /// whole record, since the caller counts signers anyway.
+    pub fn valid_signers(&self) -> Vec<[u8; 32]> {
+        let message = signed_message(&self.body);
+        let mut signers: Vec<[u8; 32]> = Vec::new();
+        for cosignature in &self.signatures {
+            if signers.contains(&cosignature.signer) {
+                continue;
+            }
+            if verifies(&cosignature.signer, &message, &cosignature.signature).is_ok() {
+                signers.push(cosignature.signer);
+            }
+        }
+        signers
+    }
+}
+
+/// Checks that `signer` made `signature` over `message`.
+fn verifies(signer: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> Result<(), SignatureError> {
+    let signer = VerifyingKey::from_bytes(signer).map_err(|_| SignatureError::InvalidSigner)?;
+    // Strict verification also rejects weak keys and signatures altered
+    // into a second valid encoding.
+    signer
+        .verify_strict(message, &Signature::from_bytes(signature))
+        .map_err(|_| SignatureError::BadSignature)
 }
 
 /// The bytes a signature over `body` covers.
@@ -145,5 +201,34 @@ mod tests {
         };
 
         assert_eq!(relabeled.verify(), Err(SignatureError::BadSignature));
+    }
+
+    #[test]
+    fn each_signer_of_a_multi_signed_body_counts_once() {
+        let first = SigningKey::from_bytes(&[4; 32]);
+        let second = SigningKey::from_bytes(&[5; 32]);
+
+        let signed = MultiSigned::sign(&[&first, &second, &first], Note { text: "hi".into() });
+
+        assert_eq!(
+            signed.valid_signers(),
+            vec![
+                first.verifying_key().to_bytes(),
+                second.verifying_key().to_bytes()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_signature_that_does_not_hold_is_left_out() {
+        let first = SigningKey::from_bytes(&[4; 32]);
+        let second = SigningKey::from_bytes(&[5; 32]);
+        let mut signed = MultiSigned::sign(&[&first, &second], Note { text: "hi".into() });
+        signed.signatures[1].signature[0] ^= 1;
+
+        assert_eq!(
+            signed.valid_signers(),
+            vec![first.verifying_key().to_bytes()]
+        );
     }
 }
