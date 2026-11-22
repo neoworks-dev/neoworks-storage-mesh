@@ -1,7 +1,9 @@
 //! Token keys, issuing and spending over HTTP; `mesh_core::tokens` describes
 //! the requests.
 
-use axum::extract::{Path, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -16,6 +18,7 @@ use mesh_core::tokens::{
 
 use crate::clock::unix_now;
 use crate::routes::Coordinator;
+use crate::sign_in_routes::check_sign_in;
 use crate::token_issuer::{IssueError, Spent};
 
 /// The token routes.
@@ -67,6 +70,7 @@ async fn signed_key(coordinator: &Coordinator, month: u64, kind: TokenKind) -> R
 /// `POST /tokens/issue`: blind signatures for a signed-in account.
 async fn issue(
     State(coordinator): State<Coordinator>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(request): Json<IssueRequest>,
 ) -> Response {
     if request.month != month_of(unix_now()) {
@@ -80,14 +84,15 @@ async fn issue(
         let reason = format!("at most {MAX_ISSUE_PER_REQUEST} tokens per request");
         return (StatusCode::BAD_REQUEST, reason).into_response();
     }
-    match coordinator
-        .accounts
-        .sign_in(&request.email, &request.auth_key)
-        .await
-    {
-        Ok(Some(_)) => {}
-        Ok(None) => return (StatusCode::UNAUTHORIZED, "wrong email or password").into_response(),
-        Err(error) => return internal_error(error.into()),
+    let checked = check_sign_in(
+        &coordinator,
+        address.ip(),
+        &request.email,
+        &request.auth_key,
+    )
+    .await;
+    if let Err(refusal) = checked {
+        return refusal.into_response();
     }
     let issued = coordinator
         .tokens

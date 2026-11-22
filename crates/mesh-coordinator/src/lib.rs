@@ -41,6 +41,7 @@ mod registry;
 mod repairs;
 mod routes;
 mod settings;
+mod sign_in_limits;
 mod sign_in_routes;
 mod speed_test;
 mod token_issuer;
@@ -49,6 +50,7 @@ mod token_routes;
 pub use coordinator_key::CoordinatorKeyError;
 pub use settings::CoordinatorSettings;
 
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,7 +59,7 @@ use mesh_client::NodeClient;
 use mesh_core::node_list::CoordinatorKey;
 use mesh_core::signed::SigningKey;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::accounts::Accounts;
 use crate::chunk_book::ChunkBook;
@@ -69,6 +71,7 @@ use crate::price_book::PriceBook;
 use crate::registry::Registry;
 use crate::repairs::Repairer;
 use crate::routes::Coordinator;
+use crate::sign_in_limits::FailedSignIns;
 use crate::token_issuer::TokenIssuer;
 
 /// How long the coordinator waits for a node to answer a check.
@@ -193,6 +196,7 @@ pub async fn serve(
         accounts: Arc::new(data.accounts),
         chunks,
         chunk_owners: settings.coordinators.clone().map(Arc::new),
+        failed_sign_ins: Arc::new(Mutex::new(FailedSignIns::new())),
         tokens: tokens.clone(),
         key: data.key.clone(),
         latest: latest.clone(),
@@ -202,7 +206,9 @@ pub async fn serve(
         monthly_allowance: settings.monthly_allowance,
         own_nodes: Arc::new(settings.own_nodes.clone()),
     };
-    let server = axum::serve(listener, routes::router(coordinator));
+    // Sign-ins are limited per address, so handlers need to see it.
+    let service = routes::router(coordinator).into_make_service_with_connect_info::<SocketAddr>();
+    let server = axum::serve(listener, service);
     // All of them run on this task, so stopping the coordinator stops them all.
     tokio::select! {
         result = server => result,

@@ -15,6 +15,7 @@ use mesh_core::node_list::{CoordinatorList, NodeRecord};
 use mesh_core::prices::PRICES_ROUTE;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
 use mesh_core::signed::{Signed, SigningKey};
+use tokio::sync::Mutex;
 
 use crate::accounts::Accounts;
 use crate::chunk_book::ChunkBook;
@@ -25,6 +26,7 @@ use crate::price_book::LatestPrices;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
 use crate::registry::{Registered, Registry};
+use crate::sign_in_limits::FailedSignIns;
 use crate::sign_in_routes;
 use crate::token_issuer::TokenIssuer;
 use crate::token_routes;
@@ -39,6 +41,7 @@ pub struct Coordinator {
     /// All coordinators, when there are several, among which this one keeps
     /// only the chunks it is responsible for.
     pub chunk_owners: Option<Arc<CoordinatorList>>,
+    pub failed_sign_ins: Arc<Mutex<FailedSignIns>>,
     pub tokens: Arc<TokenIssuer>,
     /// The coordinator's key, which signs token keys.
     pub key: SigningKey,
