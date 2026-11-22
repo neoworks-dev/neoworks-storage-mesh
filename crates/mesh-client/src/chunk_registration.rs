@@ -58,14 +58,27 @@ pub async fn register(
     manifest: &Manifest,
     expires_at: u64,
 ) -> Result<usize, RegisterError> {
+    let registrations: Vec<ChunkRegistration> = manifest
+        .chunks
+        .iter()
+        .map(|chunk| registration_of(chunk, expires_at))
+        .collect();
+    send_registrations(client, coordinator, registrations).await
+}
+
+/// Sends `registrations` to `coordinator`, as many to a request as it takes,
+/// and returns how many it keeps. Many files' chunks go out together this
+/// way, rather than in a request per file.
+pub async fn send_registrations(
+    client: &NodeClient,
+    coordinator: &str,
+    registrations: Vec<ChunkRegistration>,
+) -> Result<usize, RegisterError> {
     let url = format!("{}{CHUNKS_ROUTE}", coordinator.trim_end_matches('/'));
     let mut kept = 0;
-    for batch in manifest.chunks.chunks(MAX_CHUNKS_PER_REQUEST) {
+    for batch in registrations.chunks(MAX_CHUNKS_PER_REQUEST) {
         let request = RegisterChunks {
-            chunks: batch
-                .iter()
-                .map(|chunk| registration_of(chunk, expires_at))
-                .collect(),
+            chunks: batch.to_vec(),
         };
         // Ids, numbers and bytes always serialize.
         let body = serde_json::to_vec(&request).expect("a registration serializes");
