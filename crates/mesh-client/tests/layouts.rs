@@ -119,15 +119,22 @@ async fn no_region_holds_more_pieces_than_a_chunk_can_lose() {
 async fn repair_rebuilds_pieces_in_the_chunks_own_layout() {
     let nodes = start_nodes(6).await;
     let list = node_list(&nodes);
-    let file = random_file(1_500_000, 14);
+    // One chunk, whose five pieces leave one of the six nodes out: the node
+    // that loses its pieces has to be one that holds a piece of it.
+    let file = random_file(200_000, 14);
     let mut manifest = store_spread(&list, &file, spread_of(3, 2)).await;
+    assert_eq!(manifest.chunks.len(), 1);
+    let victim = nodes
+        .iter()
+        .find(|node| node.id == manifest.chunks[0].pieces[0].node)
+        .unwrap();
     let lost: Vec<usize> = manifest
         .chunks
         .iter()
-        .map(|chunk| position_on(chunk, &nodes[0].id))
+        .map(|chunk| position_on(chunk, &victim.id))
         .collect();
 
-    nodes[0].lose_all_pieces();
+    victim.lose_all_pieces();
     let client = NodeClient::new().unwrap();
     let report = audit(&client, &list, &manifest, AUDIT_DEADLINE).await;
     let outcome = repair(&client, &mut manifest, &report, &list, LEASE).await;
@@ -140,7 +147,7 @@ async fn repair_rebuilds_pieces_in_the_chunks_own_layout() {
     );
     // Five pieces on six nodes: the lost piece goes to the one node left.
     for (chunk, position) in manifest.chunks.iter().zip(lost) {
-        assert_ne!(chunk.pieces[position].node, nodes[0].id);
+        assert_ne!(chunk.pieces[position].node, victim.id);
     }
     assert_eq!(
         download_bytes(&client, &list, &manifest).await.unwrap(),
