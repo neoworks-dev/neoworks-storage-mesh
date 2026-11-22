@@ -120,6 +120,20 @@ impl PieceStore {
         }
     }
 
+    /// The length of the piece `id`, or `None` when the node does not hold it
+    /// at `now`.
+    pub async fn len_of(&self, id: &PieceId, now: u64) -> Result<Option<u64>, StoreError> {
+        let lease_end = self.leases.lock().await.expires_at(id)?;
+        if !lease_end.is_some_and(|end| end > now) {
+            return Ok(None);
+        }
+        match tokio::fs::metadata(self.path_of(id)).await {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Deletes every piece whose lease ended at or before `now`, and returns
     /// how many there were.
     pub async fn remove_ended(&self, now: u64) -> Result<usize, StoreError> {
@@ -135,6 +149,23 @@ impl PieceStore {
             leases.remove(id)?;
         }
         Ok(ended.len())
+    }
+
+    /// The bytes all piece files take together, counted from the directory.
+    /// Uploads in progress are left out. Pieces whose lease ended but which
+    /// the sweep has not deleted yet count, since they still take space.
+    pub async fn stored_bytes(&self) -> io::Result<u64> {
+        let mut entries = tokio::fs::read_dir(&self.pieces_directory).await?;
+        let mut total = 0;
+        while let Some(entry) = entries.next_entry().await? {
+            // Finished pieces are named by their id alone; temporary files
+            // of uploads carry a number and `.partial` after a dot.
+            if entry.file_name().to_string_lossy().contains('.') {
+                continue;
+            }
+            total += entry.metadata().await?.len();
+        }
+        Ok(total)
     }
 
     /// Writes `bytes` to `path` through a temporary file, so a reader sees

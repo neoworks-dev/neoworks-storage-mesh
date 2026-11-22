@@ -9,16 +9,23 @@ rust-version = "1.85"
 repository = "https://github.com/neoworks-dev/neoworks-storage-mesh"
 
 [workspace.dependencies]
+mesh-client = { path = "crates/mesh-client" }
+mesh-coordinator = { path = "crates/mesh-coordinator" }
 mesh-core = { path = "crates/mesh-core" }
 mesh-node = { path = "crates/mesh-node" }
 
 anyhow = "1"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 axum = "0.8"
 blake3 = "1"
+blind-rsa-signatures = "0.19"
 chacha20poly1305 = "0.11"
 clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "3"
+fastcdc = { version = "5", features = ["tokio"] }
 futures = "0.3"
-hex = "0.4"
+getrandom = "0.4"
+hex = { version = "0.4", features = ["serde"] }
 reed-solomon-simd = "3"
 reqwest = { version = "0.13", default-features = false }
 # Bundled, so nodes build the same everywhere, including on a Raspberry Pi
@@ -29,4 +36,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

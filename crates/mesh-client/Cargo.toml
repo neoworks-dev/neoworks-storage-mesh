@@ -13,9 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
+blake3.workspace = true
+blind-rsa-signatures.workspace = true
 chacha20poly1305.workspace = true
 clap.workspace = true
+fastcdc.workspace = true
 futures.workspace = true
+getrandom.workspace = true
 hex.workspace = true
 mesh-core.workspace = true
 reed-solomon-simd.workspace = true
@@ -26,5 +31,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+mesh-coordinator.workspace = true
 mesh-node.workspace = true
 tempfile.workspace = true

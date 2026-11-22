@@ -1,37 +1,93 @@
-//! Encrypting a file's chunks before they leave the device.
+//! Encrypting chunks before they leave the device, so that the same chunk
+//! always encrypts the same way for its owner.
 //!
-//! Every file gets its own random key. Each chunk is sealed with
-//! XChaCha20-Poly1305 under that key and a fresh random nonce, so the sealed
-//! bytes look random and any change to them makes opening fail. A sealed chunk
-//! is laid out as `nonce (24 bytes) ‖ ciphertext ‖ tag (16 bytes)`.
+//! Each chunk is sealed with XChaCha20-Poly1305 under its own key, and that key
+//! is a keyed hash of the chunk's bytes under the owner's [`DedupKey`]:
+//!
+//! ```text
+//! chunk key = BLAKE3-keyed(dedup key, chunk)
+//! sealed    = XChaCha20-Poly1305(chunk key, fixed nonce, chunk)
+//! ```
+//!
+//! The same chunk therefore always becomes the same sealed bytes and the same
+//! pieces, so it is stored once however many files or versions hold it. The
+//! dedup key belongs to the owner alone, so two people storing the same chunk
+//! get unrelated ciphertexts. Chunks keep their real length, though, so
+//! someone who has a file could still recognise it by its chunk sizes.
+//!
+//! A sealed chunk is the ciphertext followed by a 16-byte tag; any change to
+//! it makes opening fail.
+//!
+//! Small messages that one key seals many times, such as where a pointer
+//! leads, use a [`MessageKey`] and a random nonce instead ([`seal_message`]).
 
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// Bytes of the nonce at the start of every sealed chunk.
-const NONCE_BYTES: usize = 24;
+/// Bytes sealing adds to a chunk: the authentication tag.
+pub const SEAL_OVERHEAD: usize = 16;
 
-/// Bytes sealing adds to a chunk: the nonce and the authentication tag.
-pub const SEAL_OVERHEAD: usize = NONCE_BYTES + 16;
+/// Bound into every sealed chunk, so the format can change without old and new
+/// chunks ever being mistaken for one another.
+const ASSOCIATED_DATA: &[u8] = b"neoworks-storage-mesh/chunk/v2";
 
-/// The random key of one file. Whoever holds it can read the file, so it only
-/// ever leaves the device inside a manifest the owner keeps.
-#[derive(Clone, PartialEq, Eq)]
-pub struct FileKey([u8; 32]);
+/// The owner's secret for deriving chunk keys. Whoever holds it can test
+/// whether the owner stored a given chunk, so it never leaves the owner's
+/// devices, not even inside a manifest.
+#[derive(Clone)]
+pub struct DedupKey([u8; 32]);
 
-/// A sealed chunk that does not open: the key is wrong, or the bytes or their
-/// position were changed.
+/// The key of one chunk. Whoever holds it can read that chunk, so it only ever
+/// leaves the device inside a manifest the owner keeps.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ChunkKey([u8; 32]);
+
+/// A sealed chunk that does not open: the key is wrong or the bytes changed.
 #[derive(Debug, thiserror::Error)]
-#[error("chunk {index} does not decrypt")]
-pub struct OpenError {
-    pub index: u32,
-}
+#[error("the chunk does not decrypt")]
+pub struct OpenError;
 
-impl FileKey {
+/// A dedup key that is not 64 hex digits.
+#[derive(Debug, thiserror::Error)]
+#[error("a dedup key is 64 hex digits")]
+pub struct ParseDedupKeyError;
+
+impl DedupKey {
     /// A new random key from the operating system's random source.
     pub fn generate() -> Self {
-        FileKey(Key::<XChaCha20Poly1305>::generate().into())
+        DedupKey(Key::<XChaCha20Poly1305>::generate().into())
+    }
+
+    /// The key made of `bytes`, such as one derived from an account secret.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        DedupKey(bytes)
+    }
+
+    /// The key as 64 hex digits, for keeping it in a file.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// A key written by [`to_hex`](Self::to_hex).
+    pub fn from_hex(text: &str) -> Result<Self, ParseDedupKeyError> {
+        let mut bytes = [0u8; 32];
+        hex::decode_to_slice(text.trim(), &mut bytes).map_err(|_| ParseDedupKeyError)?;
+        Ok(DedupKey(bytes))
+    }
+
+    /// The key of a chunk with these bytes.
+    pub fn chunk_key(&self, chunk: &[u8]) -> ChunkKey {
+        ChunkKey(*blake3::keyed_hash(&self.0, chunk).as_bytes())
+    }
+}
+
+impl ChunkKey {
+    /// The secret that proves to a coordinator that a chunk registration
+    /// comes from the chunk's owner. Derived one way from the key, so the
+    /// coordinator learns nothing that opens the chunk.
+    pub(crate) fn registration_secret(&self) -> [u8; 32] {
+        blake3::derive_key("neoworks-mesh chunk registration v1", &self.0)
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
@@ -39,70 +95,122 @@ impl FileKey {
     }
 }
 
-/// Seals chunk number `index` of a file.
-pub fn seal_chunk(key: &FileKey, index: u32, plaintext: &[u8]) -> Vec<u8> {
-    // Random 192-bit nonces never repeat in practice, so one key can seal any
-    // number of chunks.
-    let nonce = XNonce::generate();
-    let associated_data = chunk_associated_data(index);
+/// Seals a chunk under its key.
+pub fn seal(key: &ChunkKey, chunk: &[u8]) -> Vec<u8> {
+    key.cipher()
+        .encrypt(&fixed_nonce(), payload(chunk))
+        // Encryption only fails for messages beyond 256 GiB; chunks are a few MiB.
+        .expect("a chunk is far below the cipher's length limit")
+}
+
+/// Opens a sealed chunk, returning the chunk. Chunks stored before padding
+/// was dropped come back with their zero padding still on.
+pub fn open(key: &ChunkKey, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
+    key.cipher()
+        .decrypt(&fixed_nonce(), payload(sealed))
+        .map_err(|_| OpenError)
+}
+
+/// The nonce every chunk is sealed with.
+///
+/// A nonce must never be used twice with one key for different messages.
+/// Each chunk key is derived from the chunk's own bytes, so a key only ever
+/// seals that one chunk, and sealing it again gives the same bytes on purpose.
+fn fixed_nonce() -> XNonce {
+    XNonce::from([0u8; 24])
+}
+
+fn payload(message: &[u8]) -> Payload<'_, 'static> {
+    Payload {
+        msg: message,
+        aad: ASSOCIATED_DATA,
+    }
+}
+
+/// Bound into every sealed message, apart from chunks, so neither can be
+/// passed off as the other.
+const MESSAGE_ASSOCIATED_DATA: &[u8] = b"neoworks-storage-mesh/message/v1";
+
+/// The length of the random nonce in front of a sealed message.
+const MESSAGE_NONCE_BYTES: usize = 24;
+
+/// A key that seals many messages, such as the targets of a pointer that
+/// moves with every new version. Unlike a chunk key it is not derived from
+/// what it seals, so every message gets a random nonce of its own.
+#[derive(Clone)]
+pub struct MessageKey([u8; 32]);
+
+impl MessageKey {
+    /// A new random key from the operating system's random source.
+    pub fn generate() -> Self {
+        MessageKey(Key::<XChaCha20Poly1305>::generate().into())
+    }
+
+    /// The key made of `bytes`, such as one kept in a file.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        MessageKey(bytes)
+    }
+
+    /// The key's bytes, for keeping it or handing it to someone it is shared
+    /// with.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
+    fn cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.0))
+    }
+}
+
+/// Seals `message` under `key`: a random nonce, then the ciphertext and tag.
+///
+/// 24 random bytes make a repeated nonce under one key so unlikely that a
+/// key can seal any number of messages.
+pub fn seal_message(key: &MessageKey, message: &[u8]) -> Vec<u8> {
+    let mut nonce = [0u8; MESSAGE_NONCE_BYTES];
+    getrandom::fill(&mut nonce).expect("the operating system's random source works");
+    let payload = Payload {
+        msg: message,
+        aad: MESSAGE_ASSOCIATED_DATA,
+    };
     let ciphertext = key
         .cipher()
-        .encrypt(
-            &nonce,
-            Payload {
-                msg: plaintext,
-                aad: &associated_data,
-            },
-        )
-        // Encryption only fails for messages beyond 256 GiB; chunks are a few MiB.
-        .expect("a chunk is far below the cipher's length limit");
-    let mut sealed = Vec::with_capacity(NONCE_BYTES + ciphertext.len());
-    sealed.extend_from_slice(&nonce);
+        .encrypt(&XNonce::from(nonce), payload)
+        // Encryption only fails for messages beyond 256 GiB.
+        .expect("a message is far below the cipher's length limit");
+    let mut sealed = nonce.to_vec();
     sealed.extend_from_slice(&ciphertext);
     sealed
 }
 
-/// Opens chunk number `index` of a file.
-pub fn open_chunk(key: &FileKey, index: u32, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
-    if sealed.len() < SEAL_OVERHEAD {
-        return Err(OpenError { index });
+/// Opens a message sealed by [`seal_message`].
+pub fn open_message(key: &MessageKey, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
+    if sealed.len() < MESSAGE_NONCE_BYTES {
+        return Err(OpenError);
     }
-    let (nonce, ciphertext) = sealed.split_at(NONCE_BYTES);
-    let nonce = XNonce::try_from(nonce).map_err(|_| OpenError { index })?;
-    let associated_data = chunk_associated_data(index);
+    let (nonce, ciphertext) = sealed.split_at(MESSAGE_NONCE_BYTES);
+    let nonce: [u8; MESSAGE_NONCE_BYTES] = nonce.try_into().map_err(|_| OpenError)?;
+    let payload = Payload {
+        msg: ciphertext,
+        aad: MESSAGE_ASSOCIATED_DATA,
+    };
     key.cipher()
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: ciphertext,
-                aad: &associated_data,
-            },
-        )
-        .map_err(|_| OpenError { index })
+        .decrypt(&XNonce::from(nonce), payload)
+        .map_err(|_| OpenError)
 }
 
-/// The associated data binds a sealed chunk to its position in the file: chunk
-/// 3 sealed as chunk 3 does not open as chunk 2. Pieces are already addressed by
-/// their hash, so nodes cannot reorder them; this guards against a manifest
-/// that lists chunks out of order.
-fn chunk_associated_data(index: u32) -> Vec<u8> {
-    let mut associated_data = b"neoworks-storage-mesh/chunk/v1".to_vec();
-    associated_data.extend_from_slice(&index.to_be_bytes());
-    associated_data
-}
-
-impl Serialize for FileKey {
+impl Serialize for ChunkKey {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&hex::encode(self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for FileKey {
+impl<'de> Deserialize<'de> for ChunkKey {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         let mut bytes = [0u8; 32];
         hex::decode_to_slice(&text, &mut bytes).map_err(serde::de::Error::custom)?;
-        Ok(FileKey(bytes))
+        Ok(ChunkKey(bytes))
     }
 }
 
@@ -111,25 +219,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_sealed_chunk_opens_with_its_key_and_index() {
-        let key = FileKey::generate();
-        let sealed = seal_chunk(&key, 7, b"holiday photo bytes");
+    fn a_sealed_chunk_opens_with_its_key() {
+        let key = DedupKey::generate().chunk_key(b"holiday photo bytes");
+        let sealed = seal(&key, b"holiday photo bytes");
 
-        assert_eq!(
-            open_chunk(&key, 7, &sealed).unwrap(),
-            b"holiday photo bytes"
-        );
+        assert_eq!(open(&key, &sealed).unwrap(), b"holiday photo bytes");
         assert_eq!(sealed.len(), b"holiday photo bytes".len() + SEAL_OVERHEAD);
     }
 
     #[test]
-    fn opening_fails_with_another_key_index_or_changed_bytes() {
-        let key = FileKey::generate();
-        let mut sealed = seal_chunk(&key, 7, b"holiday photo bytes");
+    fn opening_fails_with_another_key_or_changed_bytes() {
+        let dedup_key = DedupKey::generate();
+        let key = dedup_key.chunk_key(b"holiday photo bytes");
+        let mut sealed = seal(&key, b"holiday photo bytes");
 
-        assert!(open_chunk(&FileKey::generate(), 7, &sealed).is_err());
-        assert!(open_chunk(&key, 8, &sealed).is_err());
+        assert!(open(&dedup_key.chunk_key(b"other bytes"), &sealed).is_err());
+        sealed[3] ^= 1;
+        assert!(open(&key, &sealed).is_err());
+    }
+
+    #[test]
+    fn one_owner_seals_a_chunk_the_same_way_every_time() {
+        let dedup_key = DedupKey::generate();
+        let first = seal(&dedup_key.chunk_key(b"chunk"), b"chunk");
+        let second = seal(&dedup_key.chunk_key(b"chunk"), b"chunk");
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn two_owners_seal_the_same_chunk_differently() {
+        let alice = DedupKey::generate();
+        let bob = DedupKey::generate();
+
+        let from_alice = seal(&alice.chunk_key(b"chunk"), b"chunk");
+        let from_bob = seal(&bob.chunk_key(b"chunk"), b"chunk");
+
+        assert_ne!(from_alice, from_bob);
+    }
+
+    #[test]
+    fn a_sealed_message_opens_only_with_its_key_and_bytes() {
+        let key = MessageKey::generate();
+        let mut sealed = seal_message(&key, b"newest head");
+
+        assert_eq!(open_message(&key, &sealed).unwrap(), b"newest head");
+        assert!(open_message(&MessageKey::generate(), &sealed).is_err());
         sealed[30] ^= 1;
-        assert!(open_chunk(&key, 7, &sealed).is_err());
+        assert!(open_message(&key, &sealed).is_err());
+        assert!(open_message(&key, b"short").is_err());
+    }
+
+    #[test]
+    fn the_same_message_seals_differently_every_time() {
+        let key = MessageKey::generate();
+
+        assert_ne!(seal_message(&key, b"head"), seal_message(&key, b"head"));
+    }
+
+    #[test]
+    fn a_dedup_key_survives_being_written_down() {
+        let key = DedupKey::generate();
+        let again = DedupKey::from_hex(&key.to_hex()).unwrap();
+
+        // Keys have no `Debug`, so they can't end up in logs; compare directly.
+        assert!(key.chunk_key(b"chunk") == again.chunk_key(b"chunk"));
     }
 }

@@ -10,9 +10,14 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+blake3.workspace = true
 clap.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 mesh-core.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
