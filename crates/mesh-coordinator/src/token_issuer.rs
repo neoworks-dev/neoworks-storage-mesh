@@ -125,6 +125,31 @@ impl TokenIssuer {
         Ok(signatures)
     }
 
+    /// The accounts that took tokens in the month before `month` but none in
+    /// `month`: their data runs out unless they pay again.
+    pub async fn lapsed_accounts(&self, month: u64) -> rusqlite::Result<Vec<String>> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection.prepare(
+            "SELECT email FROM issued WHERE month + 1 = ?1
+             AND email NOT IN (SELECT email FROM issued WHERE month = ?1)
+             ORDER BY email",
+        )?;
+        let emails = statement.query_map(params![month], |row| row.get(0))?;
+        emails.collect()
+    }
+
+    /// Notes that `email` took `count` tokens in `month`, without signing
+    /// anything; for tests of what follows from issued counts.
+    #[cfg(test)]
+    pub async fn record_issued(&self, email: &str, month: u64, count: u64) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().await;
+        connection.execute(
+            "INSERT INTO issued (email, month, count) VALUES (?1, ?2, ?3)",
+            params![email, month, count],
+        )?;
+        Ok(())
+    }
+
     /// Spends `token` at `current_month`, once.
     pub async fn spend(&self, token: &Token, current_month: u64) -> Result<Spent, IssueError> {
         let connection = self.connection.lock().await;

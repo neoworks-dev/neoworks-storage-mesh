@@ -10,12 +10,14 @@
 //! keeps only what checks a sign-in and the account's secret locked under a
 //! key it never sees. Signed-in accounts get their monthly allowance of
 //! storage tokens, signed blind, and the coordinator keeps the list of spent
-//! ones. The `mesh-coordinator` binary runs
+//! ones. An account that stops taking tokens gets warned by email before its
+//! data expires. The `mesh-coordinator` binary runs
 //! one; tests start coordinators in-process through [`serve`].
 
 mod accounts;
 mod clock;
 mod coordinator_key;
+mod expiry_warnings;
 mod probe;
 mod publish;
 mod registry;
@@ -38,6 +40,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::accounts::Accounts;
+use crate::expiry_warnings::ExpiryWarnings;
 use crate::registry::Registry;
 use crate::routes::Coordinator;
 use crate::token_issuer::TokenIssuer;
@@ -52,21 +55,26 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/registry.sqlite3     node records and check results
 /// <data>/accounts.sqlite3     what checking a sign-in needs
 /// <data>/tokens.sqlite3       token keys, issued counts, spent tokens
+/// <data>/warnings.sqlite3     expiry warnings sent
+/// <data>/outbox/              warning emails for the mail tool to send
 /// ```
 pub struct CoordinatorData {
     registry: Registry,
     accounts: Accounts,
     tokens: TokenIssuer,
+    warnings: ExpiryWarnings,
     key: SigningKey,
 }
 
 /// A data directory that could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    #[error("registry: {0}")]
-    Registry(#[from] rusqlite::Error),
+    #[error("database: {0}")]
+    Database(#[from] rusqlite::Error),
     #[error("{0}")]
     Key(#[from] CoordinatorKeyError),
+    #[error("expiry warnings: {0}")]
+    Warnings(std::io::Error),
 }
 
 impl CoordinatorData {
@@ -83,6 +91,7 @@ impl CoordinatorData {
             registry: Registry::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
             tokens: TokenIssuer::open(directory)?,
+            warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
             key,
         })
     }
@@ -105,11 +114,12 @@ pub async fn serve(
         .build()
         .map_err(std::io::Error::other)?;
     let registry = Arc::new(data.registry);
+    let tokens = Arc::new(data.tokens);
     let latest = Arc::new(RwLock::new(None));
     let coordinator = Coordinator {
         registry: registry.clone(),
         accounts: Arc::new(data.accounts),
-        tokens: Arc::new(data.tokens),
+        tokens: tokens.clone(),
         key: data.key.clone(),
         latest: latest.clone(),
         http: http.clone(),
@@ -117,10 +127,11 @@ pub async fn serve(
         monthly_allowance: settings.monthly_allowance,
     };
     let server = axum::serve(listener, routes::router(coordinator));
-    // All three run on this task, so stopping the coordinator stops them all.
+    // All of them run on this task, so stopping the coordinator stops them all.
     tokio::select! {
         result = server => result,
         () = probe::probe_forever(http, registry.clone(), settings.clone()) => Ok(()),
+        () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
         () = publish::publish_forever(registry, data.key, latest, settings) => Ok(()),
     }
 }

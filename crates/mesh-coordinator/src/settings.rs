@@ -19,12 +19,22 @@ pub struct CoordinatorSettings {
     /// The storage tokens each account gets per month; 100 tokens of
     /// 100 MB are 10 GB.
     pub monthly_allowance: u64,
+    /// How often the coordinator looks for accounts to warn about expiry.
+    pub warning_interval: Duration,
+    /// How far into a month an account that has not taken its tokens gets
+    /// the first warning. A payment can be a few days late without anyone
+    /// being alarmed.
+    pub first_warning_after: Duration,
+    /// How long before its data runs out such an account gets the final
+    /// warning.
+    pub final_warning_before: Duration,
 }
 
 impl Default for CoordinatorSettings {
     /// A check every five minutes and a snapshot every hour, as the design
     /// has it; uptime over one day; records at most ten minutes off; 10 GB
-    /// of tokens per account and month.
+    /// of tokens per account and month; warnings a week into the month and
+    /// three days before the end, looked for every hour.
     fn default() -> Self {
         CoordinatorSettings {
             probe_interval: Duration::from_secs(5 * 60),
@@ -32,6 +42,9 @@ impl Default for CoordinatorSettings {
             uptime_window: Duration::from_secs(24 * 60 * 60),
             max_record_age: Duration::from_secs(10 * 60),
             monthly_allowance: 100,
+            warning_interval: Duration::from_secs(60 * 60),
+            first_warning_after: Duration::from_secs(7 * 24 * 60 * 60),
+            final_warning_before: Duration::from_secs(3 * 24 * 60 * 60),
         }
     }
 }
