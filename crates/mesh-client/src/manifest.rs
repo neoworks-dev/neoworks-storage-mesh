@@ -29,7 +29,8 @@ pub struct Manifest {
 pub struct ChunkRecord {
     /// The key the chunk is sealed with.
     pub key: ChunkKey,
-    /// The chunk's length before it was padded to its size bucket.
+    /// The chunk's length. Chunks stored before padding was dropped were
+    /// padded to a size bucket, and this is their length before padding.
     pub plain_len: u32,
     /// The sealed chunk's length, which the zeros filling the last data piece
     /// would otherwise hide.

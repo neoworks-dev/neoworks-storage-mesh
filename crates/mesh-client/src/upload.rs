@@ -10,7 +10,7 @@ use futures::future::join_all;
 use mesh_core::protocol::MAX_PIECE_BYTES;
 use tokio::io::AsyncRead;
 
-use crate::chunking::{MAX_CHUNK_BYTES, chunker, pad};
+use crate::chunking::{MAX_CHUNK_BYTES, chunker};
 use crate::encryption::{ChunkKey, DedupKey, SEAL_OVERHEAD, seal};
 use crate::erasure::{DATA_PIECES, TOTAL_PIECES, cut};
 use crate::manifest::{ChunkRecord, Manifest};
@@ -19,7 +19,7 @@ use crate::node_list::NodeList;
 use crate::placement::store_pieces;
 
 // Every piece must fit what nodes accept. A piece is a quarter of a sealed
-// chunk, and the largest chunk is padded to exactly `MAX_CHUNK_BYTES`.
+// chunk, and no chunk is larger than `MAX_CHUNK_BYTES`.
 const _: () = assert!((MAX_CHUNK_BYTES + SEAL_OVERHEAD).div_ceil(DATA_PIECES) < MAX_PIECE_BYTES);
 
 /// Why a file was not stored.
@@ -73,8 +73,7 @@ pub async fn upload(
     Ok(Manifest { size, chunks })
 }
 
-/// Pads and seals chunk `index` under `key`, cuts it and stores its six
-/// pieces.
+/// Seals chunk `index` under `key`, cuts it and stores its six pieces.
 async fn store_chunk(
     client: &NodeClient,
     list: &NodeList,
@@ -83,7 +82,7 @@ async fn store_chunk(
     plaintext: &[u8],
     lease: Duration,
 ) -> Result<ChunkRecord, UploadError> {
-    let sealed = seal(&key, &pad(plaintext));
+    let sealed = seal(&key, plaintext);
     let plain_len = u32::try_from(plaintext.len()).expect("a chunk is at most 4 MiB");
     let sealed_len = u32::try_from(sealed.len()).expect("a sealed chunk is at most 4 MiB");
     let placed = store_pieces(client, list, &cut(&sealed), &[], &[], lease).await;

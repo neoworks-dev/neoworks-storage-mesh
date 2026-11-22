@@ -118,15 +118,15 @@ async fn a_reused_chunk_that_lost_a_piece_is_stored_again() {
 }
 
 #[tokio::test]
-async fn a_small_file_is_padded_to_its_bucket() {
+async fn a_small_file_is_stored_at_its_real_size() {
     let nodes = start_nodes(NodeSettings::default()).await;
     let list = node_list(&nodes);
 
     store(&list, &DedupKey::generate(), &random_file(10_000, 14), &[]).await;
 
-    // 10,000 bytes pad to the 16 KiB bucket; sealing adds a 16-byte tag, and
-    // each of the four data pieces holds a quarter.
-    let expected_piece_len = (16 * 1024 + 16) / 4;
+    // Sealing adds a 16-byte tag to the 10,000 bytes, and each of the four
+    // data pieces holds a quarter.
+    let expected_piece_len = (10_000 + 16) / 4;
     for node in &nodes {
         for path in node.piece_files() {
             assert_eq!(std::fs::metadata(path).unwrap().len(), expected_piece_len);

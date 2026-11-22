@@ -20,8 +20,8 @@ it into erasure-coded pieces and spread those over independent nodes.
 
 ## Status
 
-Early. A file is cut into chunks where its content says, each padded to a
-size bucket and encrypted under a key derived from its bytes, so a chunk you
+Early. A file is cut into chunks where its content says, each encrypted
+under a key derived from its bytes, so a chunk you
 already stored is never stored again: an edited file only uploads the chunks
 that changed. The chunks are spread over nodes chosen from a list, so that no
 operator, network or subnet holds more pieces of a chunk than it can lose,

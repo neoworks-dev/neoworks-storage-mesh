@@ -6,14 +6,14 @@
 //!
 //! ```text
 //! chunk key = BLAKE3-keyed(dedup key, chunk)
-//! sealed    = XChaCha20-Poly1305(chunk key, fixed nonce, padded chunk)
+//! sealed    = XChaCha20-Poly1305(chunk key, fixed nonce, chunk)
 //! ```
 //!
 //! The same chunk therefore always becomes the same sealed bytes and the same
 //! pieces, so it is stored once however many files or versions hold it. The
 //! dedup key belongs to the owner alone, so two people storing the same chunk
-//! get unrelated ciphertexts, and nobody without the key can tell whether
-//! someone holds a known file.
+//! get unrelated ciphertexts. Chunks keep their real length, though, so
+//! someone who has a file could still recognise it by its chunk sizes.
 //!
 //! A sealed chunk is the ciphertext followed by a 16-byte tag; any change to
 //! it makes opening fail.
@@ -88,15 +88,16 @@ impl ChunkKey {
     }
 }
 
-/// Seals a padded chunk under its key.
-pub fn seal(key: &ChunkKey, padded_chunk: &[u8]) -> Vec<u8> {
+/// Seals a chunk under its key.
+pub fn seal(key: &ChunkKey, chunk: &[u8]) -> Vec<u8> {
     key.cipher()
-        .encrypt(&fixed_nonce(), payload(padded_chunk))
+        .encrypt(&fixed_nonce(), payload(chunk))
         // Encryption only fails for messages beyond 256 GiB; chunks are a few MiB.
         .expect("a chunk is far below the cipher's length limit")
 }
 
-/// Opens a sealed chunk, returning the padded chunk.
+/// Opens a sealed chunk, returning the chunk. Chunks stored before padding
+/// was dropped come back with their zero padding still on.
 pub fn open(key: &ChunkKey, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
     key.cipher()
         .decrypt(&fixed_nonce(), payload(sealed))

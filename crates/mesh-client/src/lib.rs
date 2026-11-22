@@ -2,8 +2,8 @@
 //!
 //! Storing a file runs entirely on the device:
 //!
-//! 1. The file is cut into chunks where its content says, about 1 MiB each,
-//!    and each chunk is padded to a size bucket ([`chunking`]).
+//! 1. The file is cut into chunks where its content says, about 1 MiB each
+//!    ([`chunking`]).
 //! 2. Each chunk is sealed under a key derived from its bytes and the owner's
 //!    [`DedupKey`], so a chunk the owner already stored is not stored again
 //!    ([`encryption`]).

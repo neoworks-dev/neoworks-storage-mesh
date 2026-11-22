@@ -53,8 +53,9 @@ pub async fn download(
         let sealed = rebuild(&pieces, chunk.sealed_len as usize)
             .map_err(|source| DownloadError::Rebuild { index, source })?;
         let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
-        // Opening proved the padded chunk is what was sealed; cutting it to
-        // the recorded length drops the padding.
+        // Chunks stored before padding was dropped open with zeros after
+        // their bytes; cutting to the recorded length drops them, and does
+        // nothing to newer chunks.
         plaintext.truncate(chunk.plain_len as usize);
         writer.write_all(&plaintext).await?;
         written += plaintext.len() as u64;
