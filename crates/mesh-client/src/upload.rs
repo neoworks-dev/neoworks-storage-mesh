@@ -1,5 +1,7 @@
 //! Storing a file: chunk, seal, cut into pieces, put each piece on a node.
 
+use std::time::Duration;
+
 use futures::future::try_join_all;
 use mesh_core::PieceId;
 use mesh_core::protocol::MAX_PIECE_BYTES;
@@ -29,16 +31,20 @@ pub enum UploadError {
     Node(#[from] NodeRequestError),
 }
 
-/// Stores `file` on `nodes`, one piece of every chunk on each node, and
-/// returns the manifest that gets it back.
+/// Stores `file` on `nodes` for `lease`, one piece of every chunk on each
+/// node, and returns the manifest that gets it back.
 ///
-/// Every piece has to be stored for the upload to succeed. Choosing nodes and
-/// retrying on others comes later; for now the caller names exactly
+/// The nodes delete the pieces once the lease ends unless [`renew`] extends
+/// it. Every piece has to be stored for the upload to succeed. Choosing nodes
+/// and retrying on others comes later; for now the caller names exactly
 /// [`TOTAL_PIECES`] nodes.
+///
+/// [`renew`]: crate::renew
 pub async fn upload(
     client: &NodeClient,
     nodes: &[String],
     file: &[u8],
+    lease: Duration,
 ) -> Result<Manifest, UploadError> {
     if nodes.len() != TOTAL_PIECES {
         return Err(UploadError::WrongNodeCount { given: nodes.len() });
@@ -50,7 +56,7 @@ pub async fn upload(
         let index = u32::try_from(index).expect("files stay below 4 PiB");
         let sealed = seal_chunk(&key, index, plaintext);
         let sealed_len = u32::try_from(sealed.len()).expect("a sealed chunk is about 1 MiB");
-        let pieces = store_pieces(client, nodes, cut(&sealed)).await?;
+        let pieces = store_pieces(client, nodes, cut(&sealed), lease).await?;
         chunks.push(ChunkRecord { sealed_len, pieces });
     }
     Ok(Manifest {
@@ -65,10 +71,11 @@ async fn store_pieces(
     client: &NodeClient,
     nodes: &[String],
     pieces: Vec<Vec<u8>>,
+    lease: Duration,
 ) -> Result<Vec<PlacedPiece>, NodeRequestError> {
     let puts = nodes.iter().zip(pieces).map(|(node, bytes)| async move {
         let id = PieceId::of(&bytes);
-        client.put(node, &id, bytes).await?;
+        client.put(node, &id, bytes, lease).await?;
         Ok(PlacedPiece {
             id,
             node: node.clone(),

@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use mesh_core::PieceId;
-use mesh_core::protocol::piece_path;
-use reqwest::StatusCode;
+use mesh_core::protocol::{LeaseResponse, lease_path, piece_path};
+use reqwest::{Response, StatusCode};
 
 /// How long one request to a node may take before the node counts as
 /// unreachable.
@@ -27,10 +27,16 @@ pub enum NodeRequestError {
         node: String,
         source: reqwest::Error,
     },
-    #[error("node {node} answered {status}")]
-    Refused { node: String, status: StatusCode },
+    #[error("node {node} answered {status}: {message}")]
+    Refused {
+        node: String,
+        status: StatusCode,
+        message: String,
+    },
     #[error("node {node} returned bytes that are not piece {id}")]
     WrongBytes { node: String, id: PieceId },
+    #[error("node {node} answered something that is not a lease")]
+    NotALease { node: String },
 }
 
 impl NodeClient {
@@ -42,34 +48,42 @@ impl NodeClient {
         Ok(NodeClient { http })
     }
 
-    /// Stores `bytes` as the piece `id` on `node`.
+    /// Stores `bytes` as the piece `id` on `node` for `lease`, and returns
+    /// when the lease ends, in Unix seconds on the node's clock.
     pub async fn put(
         &self,
         node: &str,
         id: &PieceId,
         bytes: Vec<u8>,
-    ) -> Result<(), NodeRequestError> {
+        lease: Duration,
+    ) -> Result<u64, NodeRequestError> {
+        let url = with_lease(node_url(node, &piece_path(id)), lease);
         let response = self
             .http
-            .put(piece_url(node, id))
+            .put(url)
             .body(bytes)
             .send()
             .await
             .map_err(|source| unreachable(node, source))?;
         if !response.status().is_success() {
-            return Err(NodeRequestError::Refused {
-                node: node.to_string(),
-                status: response.status(),
-            });
+            return Err(refused(node, response).await);
         }
-        Ok(())
+        read_lease_end(node, response).await
     }
 
-    /// The piece `id` from `node`, or `None` when the node does not have it.
-    pub async fn get(&self, node: &str, id: &PieceId) -> Result<Option<Vec<u8>>, NodeRequestError> {
+    /// Renews the lease of `id` on `node` to end no sooner than `lease` from
+    /// now, and returns when it ends. `None` when the node does not hold the
+    /// piece.
+    pub async fn renew(
+        &self,
+        node: &str,
+        id: &PieceId,
+        lease: Duration,
+    ) -> Result<Option<u64>, NodeRequestError> {
+        let url = with_lease(node_url(node, &lease_path(id)), lease);
         let response = self
             .http
-            .get(piece_url(node, id))
+            .post(url)
             .send()
             .await
             .map_err(|source| unreachable(node, source))?;
@@ -77,10 +91,24 @@ impl NodeClient {
             return Ok(None);
         }
         if !response.status().is_success() {
-            return Err(NodeRequestError::Refused {
-                node: node.to_string(),
-                status: response.status(),
-            });
+            return Err(refused(node, response).await);
+        }
+        Ok(Some(read_lease_end(node, response).await?))
+    }
+
+    /// The piece `id` from `node`, or `None` when the node does not have it.
+    pub async fn get(&self, node: &str, id: &PieceId) -> Result<Option<Vec<u8>>, NodeRequestError> {
+        let response = self
+            .http
+            .get(node_url(node, &piece_path(id)))
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
         }
         let bytes = response
             .bytes()
@@ -98,8 +126,37 @@ impl NodeClient {
     }
 }
 
-fn piece_url(node: &str, id: &PieceId) -> String {
-    format!("{}{}", node.trim_end_matches('/'), piece_path(id))
+/// `path` on `node`, whose base URL may end in a slash or not.
+fn node_url(node: &str, path: &str) -> String {
+    format!("{}{path}", node.trim_end_matches('/'))
+}
+
+/// `url` with the lease length as its query.
+fn with_lease(url: String, lease: Duration) -> String {
+    format!("{url}?lease_seconds={}", lease.as_secs())
+}
+
+/// The lease end in a successful store or renew response.
+async fn read_lease_end(node: &str, response: Response) -> Result<u64, NodeRequestError> {
+    let not_a_lease = || NodeRequestError::NotALease {
+        node: node.to_string(),
+    };
+    let body = response.bytes().await.map_err(|_| not_a_lease())?;
+    let lease: LeaseResponse = serde_json::from_slice(&body).map_err(|_| not_a_lease())?;
+    Ok(lease.expires_at)
+}
+
+/// The error for a response that is not a success, with the node's reason.
+async fn refused(node: &str, response: Response) -> NodeRequestError {
+    let status = response.status();
+    // The reason is for people reading the error; a body that can't be read
+    // only loses that, not the error itself.
+    let message = response.text().await.unwrap_or_default();
+    NodeRequestError::Refused {
+        node: node.to_string(),
+        status,
+        message,
+    }
 }
 
 fn unreachable(node: &str, source: reqwest::Error) -> NodeRequestError {
