@@ -8,13 +8,16 @@
 //! nobody which node a client is interested in.
 //!
 //! Which coordinators to trust is a [`CoordinatorList`] the client starts
-//! with. It is versioned and each new version is signed by a coordinator of
-//! the last one, so coordinators can be added without a protocol change.
+//! with. It is versioned and each new version is signed by more than half of
+//! the coordinators of the last one, so coordinators can be added without a
+//! protocol change and no single key can take the list over.
+
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
 use crate::NodeId;
-use crate::signed::{SignatureError, Signed, SignedBody};
+use crate::signed::{MultiSigned, SignatureError, Signed, SignedBody};
 
 /// What a node says about itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +124,8 @@ pub enum TrustError {
     UnknownSigner,
     #[error("version {offered} is not newer than version {current}")]
     NotNewer { offered: u64, current: u64 },
+    #[error("signed by {signed} coordinators on the list; a change needs {needed}")]
+    TooFewSignatures { signed: usize, needed: usize },
 }
 
 impl CoordinatorList {
@@ -137,22 +142,38 @@ impl CoordinatorList {
         Ok(())
     }
 
-    /// The list that replaces this one, when `next` is newer and signed by a
-    /// coordinator on this list.
+    /// The list that replaces this one, when `next` is newer and signed by
+    /// more than half of the coordinators on this list.
     ///
-    /// One signature is enough while the list holds one key. Once there are
-    /// several coordinators, a change should need most of them, so that one
-    /// stolen key cannot replace the others.
-    pub fn successor(&self, next: &Signed<CoordinatorList>) -> Result<CoordinatorList, TrustError> {
-        self.check_signer(next.signer)?;
-        next.verify()?;
+    /// With one signature enough, one stolen key could replace all the other
+    /// coordinators and then sign whatever node list it liked.
+    pub fn successor(
+        &self,
+        next: &MultiSigned<CoordinatorList>,
+    ) -> Result<CoordinatorList, TrustError> {
         if next.body.version <= self.version {
             return Err(TrustError::NotNewer {
                 offered: next.body.version,
                 current: self.version,
             });
         }
+        let signed = next
+            .valid_signers()
+            .into_iter()
+            .filter(|signer| self.keys.contains(&CoordinatorKey(*signer)))
+            .count();
+        let needed = self.majority();
+        if signed < needed {
+            return Err(TrustError::TooFewSignatures { signed, needed });
+        }
         Ok(next.body.clone())
+    }
+
+    /// How many of the coordinators on this list make a majority. A key
+    /// listed twice counts once, so listing a key again cannot weigh it more.
+    fn majority(&self) -> usize {
+        let distinct_keys: HashSet<[u8; 32]> = self.keys.iter().map(|key| key.0).collect();
+        distinct_keys.len() / 2 + 1
     }
 
     fn check_signer(&self, signer: [u8; 32]) -> Result<(), TrustError> {
@@ -237,33 +258,85 @@ mod tests {
         );
     }
 
+    /// `list` with `version`.
+    fn version(mut list: CoordinatorList, version: u64) -> CoordinatorList {
+        list.version = version;
+        list
+    }
+
     #[test]
-    fn a_listed_coordinator_can_add_another() {
+    fn the_only_coordinator_can_add_another() {
         let first = key(10);
         let second = key(11);
         let list = list_of(&[&first]);
-        let mut next = list_of(&[&first, &second]);
-        next.version = 2;
+        let next = version(list_of(&[&first, &second]), 2);
 
-        let accepted = list.successor(&Signed::sign(&first, next.clone()));
+        let accepted = list.successor(&MultiSigned::sign(&[&first], next.clone()));
 
         assert_eq!(accepted, Ok(next));
     }
 
     #[test]
-    fn a_list_must_be_newer_and_signed_by_a_listed_coordinator() {
-        let first = key(10);
-        let outsider = key(12);
-        let list = list_of(&[&first]);
-        let mut takeover = list_of(&[&outsider]);
-        takeover.version = 2;
+    fn a_change_needs_more_than_half_of_the_coordinators() {
+        let keys = [key(10), key(11), key(12)];
+        let list = list_of(&[&keys[0], &keys[1], &keys[2]]);
+        let next = version(list_of(&[&keys[0], &keys[1]]), 2);
+
+        let by_one = MultiSigned::sign(&[&keys[0]], next.clone());
+        let by_two = MultiSigned::sign(&[&keys[0], &keys[1]], next.clone());
 
         assert_eq!(
-            list.successor(&Signed::sign(&outsider, takeover)),
-            Err(TrustError::UnknownSigner)
+            list.successor(&by_one),
+            Err(TrustError::TooFewSignatures {
+                signed: 1,
+                needed: 2
+            })
         );
+        assert_eq!(list.successor(&by_two), Ok(next));
+    }
+
+    #[test]
+    fn half_of_an_even_list_is_not_enough() {
+        let keys = [key(10), key(11)];
+        let list = list_of(&[&keys[0], &keys[1]]);
+        let next = version(list_of(&[&keys[0]]), 2);
+
+        let by_one = MultiSigned::sign(&[&keys[0]], next);
+
         assert_eq!(
-            list.successor(&Signed::sign(&first, list.clone())),
+            list.successor(&by_one),
+            Err(TrustError::TooFewSignatures {
+                signed: 1,
+                needed: 2
+            })
+        );
+    }
+
+    #[test]
+    fn outsiders_and_repeated_signatures_do_not_count() {
+        let keys = [key(10), key(11), key(12)];
+        let outsider = key(13);
+        let list = list_of(&[&keys[0], &keys[1], &keys[2]]);
+        let takeover = version(list_of(&[&keys[0], &outsider]), 2);
+
+        let signed = MultiSigned::sign(&[&keys[0], &keys[0], &outsider], takeover);
+
+        assert_eq!(
+            list.successor(&signed),
+            Err(TrustError::TooFewSignatures {
+                signed: 1,
+                needed: 2
+            })
+        );
+    }
+
+    #[test]
+    fn a_new_list_must_have_a_higher_version() {
+        let first = key(10);
+        let list = list_of(&[&first]);
+
+        assert_eq!(
+            list.successor(&MultiSigned::sign(&[&first], list.clone())),
             Err(TrustError::NotNewer {
                 offered: 1,
                 current: 1
