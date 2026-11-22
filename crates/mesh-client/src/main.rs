@@ -36,6 +36,10 @@ use mesh_client::{
 };
 use mesh_core::node_list::CoordinatorList;
 
+use crate::account_commands::AccountArguments;
+
+mod account_commands;
+
 #[derive(Parser)]
 struct Arguments {
     #[command(subcommand)]
@@ -67,6 +71,32 @@ enum Command {
     },
     /// Reads a file back from the nodes its manifest names.
     Get { manifest: PathBuf, output: PathBuf },
+    /// Creates a new account: a secret every device of it shares.
+    AccountNew {
+        #[arg(long, default_value = "account.key")]
+        account: PathBuf,
+    },
+    /// Stores a file and records it in the account's index.
+    Store {
+        file: PathBuf,
+        /// The name to store it under; its file name if not given.
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        account: AccountArguments,
+    },
+    /// Lists the files in the account's index.
+    Ls {
+        #[command(flatten)]
+        account: AccountArguments,
+    },
+    /// Reads a file from the account's index back.
+    Fetch {
+        name: String,
+        output: PathBuf,
+        #[command(flatten)]
+        account: AccountArguments,
+    },
 }
 
 /// Where the nodes to choose from come from: a file, or a coordinator.
@@ -117,6 +147,18 @@ async fn main() -> anyhow::Result<()> {
             days,
         } => repair(&client, &manifest, &nodes, days).await,
         Command::Get { manifest, output } => get(&client, &manifest, &output).await,
+        Command::AccountNew { account } => account_commands::account_new(&account),
+        Command::Store {
+            file,
+            name,
+            account,
+        } => account_commands::store(&client, &file, name, &account).await,
+        Command::Ls { account } => account_commands::list_files(&client, &account).await,
+        Command::Fetch {
+            name,
+            output,
+            account,
+        } => account_commands::fetch(&client, &name, &output, &account).await,
     }
 }
 
@@ -269,16 +311,24 @@ async fn repair(
     Ok(())
 }
 
-/// Downloads into a temporary file next to `output` and renames it once the
-/// whole file arrived, so a failed download never leaves half a file under
-/// the name asked for.
 async fn get(client: &NodeClient, manifest_path: &Path, output: &Path) -> anyhow::Result<()> {
     let manifest = read_manifest(manifest_path)?;
+    download_to(client, &manifest, output).await
+}
+
+/// Downloads the file `manifest` describes into a temporary file next to
+/// `output` and renames it once the whole file arrived, so a failed download
+/// never leaves half a file under the name asked for.
+async fn download_to(
+    client: &NodeClient,
+    manifest: &Manifest,
+    output: &Path,
+) -> anyhow::Result<()> {
     let temporary_path = output.with_extension("partial");
     let writer = tokio::fs::File::create(&temporary_path)
         .await
         .with_context(|| format!("creating {}", temporary_path.display()))?;
-    if let Err(error) = mesh_client::download(client, &manifest, writer).await {
+    if let Err(error) = mesh_client::download(client, manifest, writer).await {
         // The partial file is useless and may be large; its removal failing
         // only leaves it behind.
         let _ = std::fs::remove_file(&temporary_path);

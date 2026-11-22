@@ -59,6 +59,11 @@ impl DedupKey {
         DedupKey(Key::<XChaCha20Poly1305>::generate().into())
     }
 
+    /// The key made of `bytes`, such as one derived from an account secret.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        DedupKey(bytes)
+    }
+
     /// The key as 64 hex digits, for keeping it in a file.
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)

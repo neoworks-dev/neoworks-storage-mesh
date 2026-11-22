@@ -122,6 +122,24 @@ target/release/mesh repair photo.manifest.json --coordinator http://127.0.0.1:70
   --coordinators coordinators.json
 ```
 
+### With an account
+
+Instead of keeping manifest files, an account keeps an index of its files in
+the mesh, behind a signed pointer. Any device with the account's secret finds
+every file:
+
+```sh
+target/release/mesh account-new
+N="--coordinator http://127.0.0.1:7000 --coordinators coordinators.json"
+target/release/mesh store photo.jpg $N
+target/release/mesh ls $N --index other-device.json
+target/release/mesh fetch photo.jpg photo-again.jpg $N --index other-device.json
+```
+
+`account.key` holds the secret: keep it private, since it opens every file
+of the account. `mesh-index.json` is this device's copy of the index;
+`--index` names another, as a second device would have.
+
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE).

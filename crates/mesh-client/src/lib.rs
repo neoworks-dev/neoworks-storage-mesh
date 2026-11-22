@@ -27,12 +27,14 @@
 //! like git's: each device keeps the whole graph, stores its commits in the
 //! mesh, and names its newest one in a pointer of its own ([`commits`]).
 
+pub mod account;
 mod audit;
 pub mod chunking;
 pub mod commits;
 mod download;
 pub mod encryption;
 pub mod erasure;
+pub mod index;
 mod manifest;
 pub mod merge;
 mod node_client;
