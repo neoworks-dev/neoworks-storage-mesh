@@ -63,7 +63,7 @@ pub async fn upload(
         let index = u32::try_from(chunks.len()).expect("files stay below a petabyte");
         let key = dedup_key.chunk_key(&plaintext);
         let record = match known.get(&key) {
-            Some(record) if renew_all(client, record, lease).await => record.clone(),
+            Some(record) if renew_all(client, list, record, lease).await => record.clone(),
             _ => store_chunk(client, list, key, index, &plaintext, lease).await?,
         };
         known.insert(record.key.clone(), record.clone());
@@ -104,13 +104,28 @@ async fn store_chunk(
 }
 
 /// Renews every piece of an already stored chunk for `lease`, and whether
-/// all six still were there to renew. A chunk missing a piece is stored again
-/// instead, rather than starting the new file with a loss.
-async fn renew_all(client: &NodeClient, record: &ChunkRecord, lease: Duration) -> bool {
+/// all six still were there to renew. A chunk missing a piece, or with a
+/// piece on a node `list` no longer has, is stored again instead, rather than
+/// starting the new file with a loss.
+async fn renew_all(
+    client: &NodeClient,
+    list: &NodeList,
+    record: &ChunkRecord,
+    lease: Duration,
+) -> bool {
+    let Some(urls) = record
+        .pieces
+        .iter()
+        .map(|piece| list.url_of(&piece.node))
+        .collect::<Option<Vec<&str>>>()
+    else {
+        return false;
+    };
     let renewals = record
         .pieces
         .iter()
-        .map(|piece| client.renew(&piece.node, &piece.id, lease));
+        .zip(urls)
+        .map(|(piece, url)| client.renew(url, &piece.id, lease));
     join_all(renewals)
         .await
         .into_iter()

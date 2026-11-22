@@ -233,7 +233,7 @@ impl Index {
             .chain(&commit_manifests)
             .flat_map(|manifest| &manifest.chunks)
             .flat_map(|chunk| &chunk.pieces);
-        let renewal = renew_pieces(session.client, pieces, session.lease).await;
+        let renewal = renew_pieces(session.client, session.list, pieces, session.lease).await;
         let (safe, at_risk): (Vec<IndexedFile>, Vec<IndexedFile>) = files
             .into_iter()
             .partition(|file| is_readable(&file.manifest, &renewal));

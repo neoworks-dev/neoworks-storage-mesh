@@ -76,7 +76,9 @@ async fn renewed_files_and_the_index_outlive_their_first_lease() {
     let found = other_device.file("photo.jpg").unwrap().unwrap();
     assert!(found.renew_by > unix_now() + 60 * 60);
     assert_eq!(
-        download_bytes(&client, &found.manifest).await.unwrap(),
+        download_bytes(&client, &list, &found.manifest)
+            .await
+            .unwrap(),
         photo
     );
 }

@@ -81,7 +81,10 @@ async fn an_edited_file_reuses_the_chunks_it_kept() {
         second.chunks.len()
     );
     let client = NodeClient::new().unwrap();
-    assert_eq!(download_bytes(&client, &second).await.unwrap(), edited);
+    assert_eq!(
+        download_bytes(&client, &list, &second).await.unwrap(),
+        edited
+    );
 }
 
 #[tokio::test]
@@ -114,7 +117,7 @@ async fn a_reused_chunk_that_lost_a_piece_is_stored_again() {
     nodes[3].stop();
     nodes[4].stop();
     let client = NodeClient::new().unwrap();
-    assert_eq!(download_bytes(&client, &second).await.unwrap(), file);
+    assert_eq!(download_bytes(&client, &list, &second).await.unwrap(), file);
 }
 
 #[tokio::test]

@@ -166,9 +166,10 @@ async fn a_file_stored_against_paid_tabs_comes_back_and_renews() {
         .unwrap();
     let file = random_file(100_000, 6);
 
+    let list = node_list(&nodes);
     let manifest = upload(
         &client,
-        &node_list(&nodes),
+        &list,
         &Account::generate().dedup_key(),
         file.as_slice(),
         LEASE,
@@ -176,7 +177,10 @@ async fn a_file_stored_against_paid_tabs_comes_back_and_renews() {
     )
     .await
     .unwrap();
-    assert_eq!(download_bytes(&client, &manifest).await.unwrap(), file);
+    assert_eq!(
+        download_bytes(&client, &list, &manifest).await.unwrap(),
+        file
+    );
 
     // Next month: new tabs, and every piece moved into them.
     let next_tabs = open_tabs(&client, &nodes_by_url, &mut wallet, 1)
@@ -184,7 +188,8 @@ async fn a_file_stored_against_paid_tabs_comes_back_and_renews() {
         .unwrap();
     let mut pieces: BTreeMap<String, Vec<PieceId>> = BTreeMap::new();
     for piece in manifest.chunks.iter().flat_map(|chunk| &chunk.pieces) {
-        pieces.entry(piece.node.clone()).or_default().push(piece.id);
+        let url = list.url_of(&piece.node).unwrap().to_string();
+        pieces.entry(url).or_default().push(piece.id);
     }
     let renewed = move_into_tabs(&client, &next_tabs, &pieces).await.unwrap();
 

@@ -13,6 +13,7 @@ use crate::erasure::{DATA_PIECES, RebuildError, rebuild};
 use crate::manifest::{ChunkRecord, Manifest, PlacedPiece};
 use crate::node_client::NodeClient;
 use crate::node_latency::LatencyTable;
+use crate::node_list::NodeList;
 
 /// How many chunks a download fetches at once. More chunks use more nodes at
 /// the same time; each one in flight holds up to 4 MiB of pieces and its
@@ -47,15 +48,19 @@ pub enum DownloadError {
 ///
 /// On an error, `writer` may already hold the chunks before the failing one,
 /// so whatever it writes to should be discarded.
+///
+/// Nodes are found at their addresses in `list`; a node it does not have
+/// counts as unreachable.
 pub async fn download(
     client: &NodeClient,
+    list: &NodeList,
     manifest: &Manifest,
     mut writer: impl AsyncWrite + Unpin,
 ) -> Result<(), DownloadError> {
     // `buffered` runs the fetches side by side but yields them in chunk
     // order, which is the order the file needs them in.
     let mut chunks = stream::iter(manifest.chunks.iter().enumerate())
-        .map(|(index, chunk)| fetch_chunk(client, index, chunk))
+        .map(|(index, chunk)| fetch_chunk(client, list, index, chunk))
         .buffered(CHUNKS_IN_FLIGHT);
     let mut written = 0;
     while let Some(plaintext) = chunks.next().await {
@@ -78,12 +83,13 @@ pub async fn download(
 /// Fetches, rebuilds and opens chunk `index`, returning its bytes.
 async fn fetch_chunk(
     client: &NodeClient,
+    list: &NodeList,
     index: usize,
     chunk: &ChunkRecord,
 ) -> Result<Vec<u8>, DownloadError> {
     // The manifest was written by `upload`, which numbers chunks with a u32.
     let index = u32::try_from(index).expect("chunk indexes fit a u32");
-    let pieces = fetch_pieces(client, &chunk.pieces).await;
+    let pieces = fetch_pieces(client, list, &chunk.pieces).await;
     let sealed = rebuild(&pieces, chunk.sealed_len as usize)
         .map_err(|source| DownloadError::Rebuild { index, source })?;
     let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
@@ -101,11 +107,19 @@ async fn fetch_chunk(
 /// one more node each time a piece fails or nothing arrives for
 /// [`HEDGE_DELAY`]. Requests still running once enough pieces are in are
 /// dropped, which cancels them.
-async fn fetch_pieces(client: &NodeClient, pieces: &[PlacedPiece]) -> Vec<Option<Vec<u8>>> {
-    let mut not_asked = fastest_first(client.latencies(), pieces).into_iter();
+async fn fetch_pieces(
+    client: &NodeClient,
+    list: &NodeList,
+    pieces: &[PlacedPiece],
+) -> Vec<Option<Vec<u8>>> {
+    let urls: Vec<Option<&str>> = pieces
+        .iter()
+        .map(|piece| list.url_of(&piece.node))
+        .collect();
+    let mut not_asked = fastest_first(client.latencies(), &urls).into_iter();
     let mut running = FuturesUnordered::new();
     for index in not_asked.by_ref().take(DATA_PIECES) {
-        running.push(fetch_piece(client, pieces, index));
+        running.push(fetch_piece(client, pieces, &urls, index));
     }
     let mut found = vec![None; pieces.len()];
     let mut arrived = 0;
@@ -123,20 +137,27 @@ async fn fetch_pieces(client: &NodeClient, pieces: &[PlacedPiece]) -> Vec<Option
         }
         // A piece failed or none arrived in time: ask another node alongside.
         if let Some(index) = not_asked.next() {
-            running.push(fetch_piece(client, pieces, index));
+            running.push(fetch_piece(client, pieces, &urls, index));
         }
     }
     found
 }
 
 /// Piece `index` of `pieces` with its index, or `None` when it cannot be had.
+/// `urls` holds the address of each piece's node, `None` for a node the list
+/// does not have.
 async fn fetch_piece(
     client: &NodeClient,
     pieces: &[PlacedPiece],
+    urls: &[Option<&str>],
     index: usize,
 ) -> (usize, Option<Vec<u8>>) {
     let piece = &pieces[index];
-    match client.get(&piece.node, &piece.id).await {
+    let Some(url) = urls[index] else {
+        eprintln!("node {} is not in the node list", piece.node);
+        return (index, None);
+    };
+    match client.get(url, &piece.id).await {
         Ok(bytes) => (index, bytes),
         Err(error) => {
             eprintln!("{error}");
@@ -145,60 +166,61 @@ async fn fetch_piece(
     }
 }
 
-/// The indexes of `pieces`, those on the nodes that answered fastest last
-/// time first.
+/// The indexes of the pieces whose nodes are at `urls`, those on the nodes
+/// that answered fastest last time first.
 ///
-/// A node never asked counts as fast, so it gets measured. Ties keep piece
-/// order, which puts the data pieces first: when those arrive, rebuilding
-/// needs no decoding.
-fn fastest_first(latencies: &LatencyTable, pieces: &[PlacedPiece]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..pieces.len()).collect();
-    order.sort_by_key(|&index| {
-        latencies
-            .last_answer(&pieces[index].node)
-            .unwrap_or(Duration::ZERO)
+/// A node never asked counts as fast, so it gets measured; a node missing from
+/// the list goes last, since asking it can't work. Ties keep piece order,
+/// which puts the data pieces first: when those arrive, rebuilding needs no
+/// decoding.
+fn fastest_first(latencies: &LatencyTable, urls: &[Option<&str>]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..urls.len()).collect();
+    order.sort_by_key(|&index| match urls[index] {
+        Some(url) => latencies.last_answer(url).unwrap_or(Duration::ZERO),
+        None => Duration::MAX,
     });
     order
 }
 
 #[cfg(test)]
 mod tests {
-    use mesh_core::PieceId;
-    use mesh_core::merkle::root_of;
-
     use super::*;
 
-    fn pieces_on(nodes: &[&str]) -> Vec<PlacedPiece> {
-        nodes
-            .iter()
-            .map(|node| PlacedPiece {
-                id: PieceId::of(node.as_bytes()),
-                merkle_root: root_of(node.as_bytes()),
-                node: node.to_string(),
-            })
-            .collect()
-    }
+    const URLS: [Option<&str>; 6] = [
+        Some("a"),
+        Some("b"),
+        Some("c"),
+        Some("d"),
+        Some("e"),
+        Some("f"),
+    ];
 
     #[test]
     fn unmeasured_nodes_keep_piece_order() {
-        let pieces = pieces_on(&["a", "b", "c", "d", "e", "f"]);
-
-        let order = fastest_first(&LatencyTable::default(), &pieces);
+        let order = fastest_first(&LatencyTable::default(), &URLS);
 
         assert_eq!(order, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn slow_nodes_go_last_and_unmeasured_ones_first() {
-        let pieces = pieces_on(&["a", "b", "c", "d", "e", "f"]);
         let latencies = LatencyTable::default();
         latencies.record("a", Duration::from_millis(900));
         latencies.record("b", Duration::from_millis(20));
         latencies.record("c", Duration::from_millis(30));
         latencies.record("f", Duration::from_millis(10));
 
-        let order = fastest_first(&latencies, &pieces);
+        let order = fastest_first(&latencies, &URLS);
 
         assert_eq!(order, [3, 4, 5, 1, 2, 0]);
+    }
+
+    #[test]
+    fn nodes_missing_from_the_list_go_last() {
+        let urls = [None, Some("b"), Some("c"), Some("d"), Some("e"), Some("f")];
+
+        let order = fastest_first(&LatencyTable::default(), &urls);
+
+        assert_eq!(order, [1, 2, 3, 4, 5, 0]);
     }
 }

@@ -9,8 +9,8 @@
 //! or in two versions of one, is stored once. Each file's renewals keep the
 //! shared pieces alive, so deleting one file leaves the other whole.
 
-use mesh_core::PieceId;
 use mesh_core::merkle::MerkleHash;
+use mesh_core::{NodeId, PieceId};
 use serde::{Deserialize, Serialize};
 
 use crate::encryption::ChunkKey;
@@ -47,6 +47,7 @@ pub struct PlacedPiece {
     /// manifest check that the node still has the piece without downloading
     /// it. It reveals nothing about the piece's contents.
     pub merkle_root: MerkleHash,
-    /// The node's base URL, e.g. `http://127.0.0.1:7001`.
-    pub node: String,
+    /// The id of the node holding it. Its address is looked up in the node
+    /// list when needed, so a node that moves keeps its pieces.
+    pub node: NodeId,
 }

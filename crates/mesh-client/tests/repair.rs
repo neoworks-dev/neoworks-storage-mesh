@@ -9,6 +9,7 @@ use std::time::Duration;
 use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth, audit, repair,
 };
+use mesh_core::NodeId;
 use mesh_node::NodeSettings;
 use test_nodes::{
     TestNode, download_bytes, node_list, position_on, random_file, start_nodes, store_on,
@@ -46,7 +47,7 @@ fn all_nodes(nodes: &[TestNode], spares: &[TestNode]) -> NodeList {
 /// Audits and repairs `manifest` with a fresh client, as a later run would.
 async fn audit_and_repair(manifest: &mut Manifest, list: &NodeList) -> Vec<ChunkRepair> {
     let client = NodeClient::new().unwrap();
-    let report = audit(&client, manifest, AUDIT_DEADLINE).await;
+    let report = audit(&client, list, manifest, AUDIT_DEADLINE).await;
     repair(&client, manifest, &report, list, LEASE).await.chunks
 }
 
@@ -70,15 +71,16 @@ async fn lost_pieces_are_rebuilt_on_spare_nodes() {
         .iter()
         .map(|chunk| {
             [
-                position_on(chunk, &nodes[1].url),
-                position_on(chunk, &nodes[4].url),
+                position_on(chunk, &nodes[1].id),
+                position_on(chunk, &nodes[4].id),
             ]
         })
         .collect();
+    let list = all_nodes(&nodes, &spares);
 
     nodes[1].stop();
     nodes[4].lose_all_pieces();
-    let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
+    let outcome = audit_and_repair(&mut manifest, &list).await;
 
     assert_eq!(
         outcome,
@@ -87,16 +89,19 @@ async fn lost_pieces_are_rebuilt_on_spare_nodes() {
     // Every other node already holds a piece of each chunk, so the two lost
     // pieces can only have gone to the two spares, one each.
     for (chunk, [first, second]) in manifest.chunks.iter().zip(lost_positions) {
-        let mut new_nodes = [
-            chunk.pieces[first].node.clone(),
-            chunk.pieces[second].node.clone(),
-        ];
+        let mut new_nodes = [chunk.pieces[first].node, chunk.pieces[second].node];
         new_nodes.sort();
-        let mut spare_urls = [spares[0].url.clone(), spares[1].url.clone()];
-        spare_urls.sort();
-        assert_eq!(new_nodes, spare_urls);
+        let mut spare_ids = [spares[0].id, spares[1].id];
+        spare_ids.sort();
+        assert_eq!(new_nodes, spare_ids);
     }
-    let report = audit(&NodeClient::new().unwrap(), &manifest, AUDIT_DEADLINE).await;
+    let report = audit(
+        &NodeClient::new().unwrap(),
+        &list,
+        &manifest,
+        AUDIT_DEADLINE,
+    )
+    .await;
     assert!(report.chunks.iter().all(|chunk| chunk.healthy() == 6));
 }
 
@@ -104,15 +109,16 @@ async fn lost_pieces_are_rebuilt_on_spare_nodes() {
 async fn a_repaired_file_survives_two_more_losses() {
     let (nodes, mut manifest) = stored_file().await;
     let spares = start_spares(2).await;
+    let list = all_nodes(&nodes, &spares);
     nodes[0].stop();
     nodes[5].stop();
-    audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
+    audit_and_repair(&mut manifest, &list).await;
 
     // Without repair, losing two more would leave only two pieces per chunk.
     nodes[2].stop();
     nodes[3].stop();
 
-    let file = download_bytes(&NodeClient::new().unwrap(), &manifest).await;
+    let file = download_bytes(&NodeClient::new().unwrap(), &list, &manifest).await;
     assert_eq!(file.unwrap(), sample_file());
 }
 
@@ -137,7 +143,7 @@ async fn a_spare_node_that_is_down_is_passed_over() {
     let lost_positions: Vec<usize> = manifest
         .chunks
         .iter()
-        .map(|chunk| position_on(chunk, &nodes[2].url))
+        .map(|chunk| position_on(chunk, &nodes[2].id))
         .collect();
     spares[0].stop();
 
@@ -149,7 +155,7 @@ async fn a_spare_node_that_is_down_is_passed_over() {
         vec![ChunkRepair::Repaired { replaced: 1 }; manifest.chunks.len()]
     );
     for (chunk, position) in manifest.chunks.iter().zip(lost_positions) {
-        assert_eq!(chunk.pieces[position].node, spares[1].url);
+        assert_eq!(chunk.pieces[position].node, spares[1].id);
     }
 }
 
@@ -173,28 +179,35 @@ async fn too_few_spare_nodes_leave_pieces_unplaced() {
 async fn a_chunk_with_three_losses_is_reported_lost() {
     let (nodes, mut manifest) = stored_file().await;
     let spares = start_spares(3).await;
-    let nodes_before: Vec<String> = manifest.chunks[0]
+    let nodes_before: Vec<NodeId> = manifest.chunks[0]
         .pieces
         .iter()
-        .map(|piece| piece.node.clone())
+        .map(|piece| piece.node)
         .collect();
+    let list = all_nodes(&nodes, &spares);
 
     nodes[0].stop();
     nodes[1].stop();
     nodes[2].stop();
-    let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
+    let outcome = audit_and_repair(&mut manifest, &list).await;
 
     assert_eq!(
         outcome,
         vec![ChunkRepair::Lost { fetched: 3 }; manifest.chunks.len()]
     );
-    let nodes_after: Vec<String> = manifest.chunks[0]
+    let nodes_after: Vec<NodeId> = manifest.chunks[0]
         .pieces
         .iter()
-        .map(|piece| piece.node.clone())
+        .map(|piece| piece.node)
         .collect();
     assert_eq!(nodes_after, nodes_before);
-    let report = audit(&NodeClient::new().unwrap(), &manifest, AUDIT_DEADLINE).await;
-    let position = position_on(&manifest.chunks[0], &nodes[0].url);
+    let report = audit(
+        &NodeClient::new().unwrap(),
+        &list,
+        &manifest,
+        AUDIT_DEADLINE,
+    )
+    .await;
+    let position = position_on(&manifest.chunks[0], &nodes[0].id);
     assert_eq!(report.chunks[0].pieces[position], PieceHealth::Unreachable);
 }

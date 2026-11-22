@@ -8,7 +8,7 @@ use std::time::Duration;
 use mesh_client::{Manifest, NodeClient, NodeRequestError, PlacedPiece};
 use mesh_node::NodeSettings;
 use reqwest::StatusCode;
-use test_nodes::{TestNode, node_list, piece_on, random_file, start_nodes, store_on};
+use test_nodes::{TestNode, node_list, piece_on, random_file, start_nodes, store_on, url_of};
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -21,11 +21,11 @@ async fn stored_file() -> (Vec<TestNode>, Manifest) {
     (nodes, manifest)
 }
 
-/// How many segments `piece` has, as its node reports it.
-async fn segment_count_of(piece: &PlacedPiece) -> u32 {
+/// How many segments `piece` has, as its node at `url` reports it.
+async fn segment_count_of(url: &str, piece: &PlacedPiece) -> u32 {
     let proofs = NodeClient::new()
         .unwrap()
-        .challenge(&piece.node, &piece.id, &[0])
+        .challenge(url, &piece.id, &[0])
         .await
         .unwrap()
         .unwrap();
@@ -34,13 +34,14 @@ async fn segment_count_of(piece: &PlacedPiece) -> u32 {
 
 #[tokio::test]
 async fn an_honest_node_proves_it_holds_its_pieces() {
-    let (_nodes, manifest) = stored_file().await;
+    let (nodes, manifest) = stored_file().await;
     let piece = &manifest.chunks[0].pieces[4];
-    let last = segment_count_of(piece).await - 1;
+    let url = url_of(&nodes, &piece.node);
+    let last = segment_count_of(url, piece).await - 1;
 
     let proofs = NodeClient::new()
         .unwrap()
-        .challenge(&piece.node, &piece.id, &[last, 0, last / 2])
+        .challenge(url, &piece.id, &[last, 0, last / 2])
         .await
         .unwrap()
         .unwrap();
@@ -57,12 +58,12 @@ async fn an_honest_node_proves_it_holds_its_pieces() {
 #[tokio::test]
 async fn a_node_with_corrupted_pieces_cannot_prove_them() {
     let (nodes, manifest) = stored_file().await;
-    let piece = piece_on(&manifest.chunks[0], &nodes[2].url);
+    let piece = piece_on(&manifest.chunks[0], &nodes[2].id);
 
     nodes[2].corrupt_all_pieces();
     let proofs = NodeClient::new()
         .unwrap()
-        .challenge(&piece.node, &piece.id, &[0, 1, 2])
+        .challenge(&nodes[2].url, &piece.id, &[0, 1, 2])
         .await
         .unwrap()
         .unwrap();
@@ -77,12 +78,12 @@ async fn a_node_with_corrupted_pieces_cannot_prove_them() {
 #[tokio::test]
 async fn a_node_that_lost_a_piece_says_so() {
     let (nodes, manifest) = stored_file().await;
-    let piece = piece_on(&manifest.chunks[0], &nodes[3].url);
+    let piece = piece_on(&manifest.chunks[0], &nodes[3].id);
 
     nodes[3].lose_all_pieces();
     let answer = NodeClient::new()
         .unwrap()
-        .challenge(&piece.node, &piece.id, &[0])
+        .challenge(&nodes[3].url, &piece.id, &[0])
         .await
         .unwrap();
 
@@ -91,14 +92,15 @@ async fn a_node_that_lost_a_piece_says_so() {
 
 #[tokio::test]
 async fn nodes_refuse_challenges_beyond_the_piece_or_too_large() {
-    let (_nodes, manifest) = stored_file().await;
+    let (nodes, manifest) = stored_file().await;
     let piece = &manifest.chunks[0].pieces[0];
+    let url = url_of(&nodes, &piece.node);
     let client = NodeClient::new().unwrap();
-    let count = segment_count_of(piece).await;
+    let count = segment_count_of(url, piece).await;
     let too_many: Vec<u32> = (0..65).collect();
 
     for segments in [vec![count], vec![], too_many] {
-        let result = client.challenge(&piece.node, &piece.id, &segments).await;
+        let result = client.challenge(url, &piece.id, &segments).await;
         assert!(
             matches!(
                 result,

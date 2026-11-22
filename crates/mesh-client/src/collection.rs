@@ -190,7 +190,7 @@ impl Collection {
         let Some((remote, version)) = self.read_remote(client, list, access).await? else {
             return Ok(());
         };
-        fetch_new(client, &mut self.graph, &remote).await?;
+        fetch_new(client, list, &mut self.graph, &remote).await?;
         self.head = Some(remote);
         self.version = self.version.max(version);
         Ok(())
@@ -283,7 +283,7 @@ impl Collection {
         remote: CommitRef,
         version: u64,
     ) -> Result<bool, CollectionError> {
-        fetch_new(writer.client, &mut self.graph, &remote).await?;
+        fetch_new(writer.client, writer.list, &mut self.graph, &remote).await?;
         self.version = self.version.max(version);
         let Some(local) = &self.head else {
             self.head = Some(remote);

@@ -3,14 +3,15 @@
 //!
 //! ```sh
 //! mesh put photo.jpg --nodes nodes.json --manifest photo.manifest.json
-//! mesh renew photo.manifest.json --days 30
-//! mesh audit photo.manifest.json
+//! mesh renew photo.manifest.json --nodes nodes.json --days 30
+//! mesh audit photo.manifest.json --nodes nodes.json
 //! mesh repair photo.manifest.json --nodes nodes.json
-//! mesh get photo.manifest.json photo-again.jpg
+//! mesh get photo.manifest.json photo-again.jpg --nodes nodes.json
 //! ```
 //!
 //! `nodes.json` lists the nodes to choose from; `mesh_client::NodeList`
-//! describes it. Instead of `--nodes`, `put` and `repair` take
+//! describes it. Manifests name nodes by id, so every command looks up where
+//! the nodes are now in the list. Instead of `--nodes`, every command takes
 //! `--coordinator http://… --coordinators coordinators.json` to fetch the
 //! signed node list, where `coordinators.json` holds the coordinator list
 //! whose keys it must be signed with:
@@ -54,11 +55,17 @@ enum Command {
     /// Makes the nodes keep a file for another number of days from now.
     Renew {
         manifest: PathBuf,
+        #[command(flatten)]
+        nodes: NodeListArguments,
         #[arg(long, default_value_t = 30)]
         days: u64,
     },
     /// Checks that the nodes still hold every piece, without downloading them.
-    Audit { manifest: PathBuf },
+    Audit {
+        manifest: PathBuf,
+        #[command(flatten)]
+        nodes: NodeListArguments,
+    },
     /// Audits a file, rebuilds the pieces that are lost onto other nodes from
     /// the list and updates the manifest.
     Repair {
@@ -70,7 +77,12 @@ enum Command {
         days: u64,
     },
     /// Reads a file back from the nodes its manifest names.
-    Get { manifest: PathBuf, output: PathBuf },
+    Get {
+        manifest: PathBuf,
+        output: PathBuf,
+        #[command(flatten)]
+        nodes: NodeListArguments,
+    },
     /// Creates a new account: a secret every device of it shares.
     AccountNew {
         #[arg(long, default_value = "account.key")]
@@ -164,14 +176,22 @@ async fn main() -> anyhow::Result<()> {
     let client = NodeClient::new()?;
     match Arguments::parse().command {
         Command::Put(arguments) => put(&client, &arguments).await,
-        Command::Renew { manifest, days } => renew(&client, &manifest, days).await,
-        Command::Audit { manifest } => audit(&client, &manifest).await,
+        Command::Renew {
+            manifest,
+            nodes,
+            days,
+        } => renew(&client, &manifest, &nodes, days).await,
+        Command::Audit { manifest, nodes } => audit(&client, &manifest, &nodes).await,
         Command::Repair {
             manifest,
             nodes,
             days,
         } => repair(&client, &manifest, &nodes, days).await,
-        Command::Get { manifest, output } => get(&client, &manifest, &output).await,
+        Command::Get {
+            manifest,
+            output,
+            nodes,
+        } => get(&client, &manifest, &output, &nodes).await,
         Command::AccountNew { account } => account_commands::account_new(&account),
         Command::SignUp {
             email,
@@ -269,9 +289,15 @@ fn load_or_create_dedup_key(path: &Path) -> anyhow::Result<DedupKey> {
     Ok(key)
 }
 
-async fn renew(client: &NodeClient, manifest_path: &Path, days: u64) -> anyhow::Result<()> {
+async fn renew(
+    client: &NodeClient,
+    manifest_path: &Path,
+    nodes: &NodeListArguments,
+    days: u64,
+) -> anyhow::Result<()> {
+    let list = load_node_list(client, nodes).await?;
     let manifest = read_manifest(manifest_path)?;
-    let report = mesh_client::renew(client, &manifest, days_to_duration(days)).await;
+    let report = mesh_client::renew(client, &list, &manifest, days_to_duration(days)).await;
     println!(
         "renewed {} pieces for {days} days, {} not renewed",
         report.renewed,
@@ -282,9 +308,14 @@ async fn renew(client: &NodeClient, manifest_path: &Path, days: u64) -> anyhow::
 
 /// Prints one line per chunk, the unhealthy pieces under it, and whether the
 /// file can still be read.
-async fn audit(client: &NodeClient, manifest_path: &Path) -> anyhow::Result<()> {
+async fn audit(
+    client: &NodeClient,
+    manifest_path: &Path,
+    nodes: &NodeListArguments,
+) -> anyhow::Result<()> {
+    let list = load_node_list(client, nodes).await?;
     let manifest = read_manifest(manifest_path)?;
-    let report = mesh_client::audit(client, &manifest, AUDIT_DEADLINE).await;
+    let report = mesh_client::audit(client, &list, &manifest, AUDIT_DEADLINE).await;
     for (index, (chunk, chunk_audit)) in manifest.chunks.iter().zip(&report.chunks).enumerate() {
         println!(
             "chunk {index}: {} of {} pieces healthy",
@@ -320,7 +351,7 @@ async fn repair(
 ) -> anyhow::Result<()> {
     let list = load_node_list(client, nodes).await?;
     let mut manifest = read_manifest(manifest_path)?;
-    let audit = mesh_client::audit(client, &manifest, AUDIT_DEADLINE).await;
+    let audit = mesh_client::audit(client, &list, &manifest, AUDIT_DEADLINE).await;
     let lease = days_to_duration(days);
     let report = mesh_client::repair(client, &mut manifest, &audit, &list, lease).await;
     let mut any_moved = false;
@@ -347,16 +378,24 @@ async fn repair(
     Ok(())
 }
 
-async fn get(client: &NodeClient, manifest_path: &Path, output: &Path) -> anyhow::Result<()> {
+async fn get(
+    client: &NodeClient,
+    manifest_path: &Path,
+    output: &Path,
+    nodes: &NodeListArguments,
+) -> anyhow::Result<()> {
+    let list = load_node_list(client, nodes).await?;
     let manifest = read_manifest(manifest_path)?;
-    download_to(client, &manifest, output).await
+    download_to(client, &list, &manifest, output).await
 }
 
-/// Downloads the file `manifest` describes into a temporary file next to
-/// `output` and renames it once the whole file arrived, so a failed download
-/// never leaves half a file under the name asked for.
+/// Downloads the file `manifest` describes from nodes in `list` into a
+/// temporary file next to `output` and renames it once the whole file
+/// arrived, so a failed download never leaves half a file under the name
+/// asked for.
 async fn download_to(
     client: &NodeClient,
+    list: &NodeList,
     manifest: &Manifest,
     output: &Path,
 ) -> anyhow::Result<()> {
@@ -364,7 +403,7 @@ async fn download_to(
     let writer = tokio::fs::File::create(&temporary_path)
         .await
         .with_context(|| format!("creating {}", temporary_path.display()))?;
-    if let Err(error) = mesh_client::download(client, manifest, writer).await {
+    if let Err(error) = mesh_client::download(client, list, manifest, writer).await {
         // The partial file is useless and may be large; its removal failing
         // only leaves it behind.
         let _ = std::fs::remove_file(&temporary_path);

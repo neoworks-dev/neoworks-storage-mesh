@@ -73,6 +73,14 @@ pub enum NodeListError {
 }
 
 impl NodeList {
+    /// The URL of the node `id`, or `None` when the list does not have it.
+    /// Manifests name nodes by id, so this is where a node that moved is
+    /// found at its new address.
+    pub fn url_of(&self, id: &NodeId) -> Option<&str> {
+        let node = self.nodes.iter().find(|node| node.id == *id)?;
+        Some(&node.url)
+    }
+
     /// Reads a node list from a JSON file.
     pub fn read(path: &Path) -> Result<Self, NodeListError> {
         let json = std::fs::read(path)?;

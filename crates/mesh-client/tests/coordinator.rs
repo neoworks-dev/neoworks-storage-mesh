@@ -73,7 +73,10 @@ async fn a_file_is_stored_on_nodes_from_the_coordinator() {
     let file = random_file(100_000, 3);
     let manifest = store_on(&list, &file, LEASE).await.unwrap();
 
-    assert_eq!(download_bytes(&client, &manifest).await.unwrap(), file);
+    assert_eq!(
+        download_bytes(&client, &list, &manifest).await.unwrap(),
+        file
+    );
     let ids: Vec<_> = list.nodes.iter().map(|node| node.id).collect();
     assert!(nodes.iter().all(|node| ids.contains(&node.id)));
 }

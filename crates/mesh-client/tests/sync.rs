@@ -102,7 +102,7 @@ async fn a_second_device_fetches_only_the_commits_it_lacks() {
     let (head, version) = read_head(&client, &list, &laptop_public, &keys.1, None)
         .await
         .unwrap();
-    let fetched = fetch_new(&client, &mut phone, &head).await.unwrap();
+    let fetched = fetch_new(&client, &list, &mut phone, &head).await.unwrap();
 
     assert_eq!(version, 3);
     assert_eq!(fetched, 3);
@@ -118,7 +118,7 @@ async fn a_second_device_fetches_only_the_commits_it_lacks() {
     let (head, _) = read_head(&client, &list, &laptop_public, &keys.1, Some(version))
         .await
         .unwrap();
-    let fetched = fetch_new(&client, &mut phone, &head).await.unwrap();
+    let fetched = fetch_new(&client, &list, &mut phone, &head).await.unwrap();
 
     assert_eq!(fetched, 1);
     assert_eq!(phone.entries_at(&head.id).unwrap().len(), 3);
