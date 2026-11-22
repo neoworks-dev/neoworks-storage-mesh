@@ -80,6 +80,9 @@ pub struct ListedNode {
     /// never said. Only the node knows this, so it is a claim; prices
     /// ([`crate::prices`]) count it no higher than the node's capacity.
     pub used_bytes: Option<u64>,
+    /// Whether the node is run by the coordinator itself, and so takes
+    /// allowance tokens ([`crate::tokens::TokenKind::Allowance`]).
+    pub takes_allowance: bool,
 }
 
 /// Every node a coordinator knows, at one moment.
@@ -228,6 +231,7 @@ mod tests {
                 uptime_permille: 990,
                 bandwidth_bits_per_second: None,
                 used_bytes: None,
+                takes_allowance: false,
             }],
             daily_loss_per_million: None,
         };

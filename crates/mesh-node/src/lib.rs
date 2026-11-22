@@ -14,6 +14,7 @@ mod clock;
 mod lease_table;
 mod node_data;
 mod node_key;
+mod own_price;
 mod piece_store;
 mod pointer_store;
 mod registration;
@@ -45,7 +46,6 @@ pub async fn serve(
     data: NodeData,
     settings: NodeSettings,
 ) -> std::io::Result<()> {
-    let identity = data.identity();
     let pieces = Arc::new(data.pieces);
     let pointers = Arc::new(data.pointers);
     let tabs = Arc::new(data.tabs);
@@ -53,7 +53,7 @@ pub async fn serve(
         pieces.clone(),
         pointers.clone(),
         tabs.clone(),
-        identity,
+        data.key,
         &settings,
     );
     let server = axum::serve(listener, app);

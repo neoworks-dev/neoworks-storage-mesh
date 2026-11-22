@@ -44,6 +44,7 @@ pub async fn snapshot(
             uptime_permille,
             bandwidth_bits_per_second: measurements.bandwidth(&node_id, bandwidth_since).await?,
             used_bytes: measurements.usage(&node_id, uptime_since).await?,
+            takes_allowance: settings.own_nodes.contains(&node_id),
         });
     }
     let loss_since = now.saturating_sub(settings.loss_window.as_secs());

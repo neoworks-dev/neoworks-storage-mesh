@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use mesh_core::NodeId;
+
 /// How a coordinator runs.
 #[derive(Clone, Debug)]
 pub struct CoordinatorSettings {
@@ -26,9 +28,12 @@ pub struct CoordinatorSettings {
     pub lost_after: Duration,
     /// The span the loss rate is measured over.
     pub loss_window: Duration,
-    /// The storage tokens each account gets per month; 100 tokens of
-    /// 100 MB are 10 GB.
+    /// The allowance tokens each signed-in account gets per month, which only
+    /// the coordinator's own nodes take. 40 tokens are 5 GB for a month at
+    /// the starting price of fast nodes, 8,000 tokens per TB.
     pub monthly_allowance: u64,
+    /// The nodes the coordinator runs itself, which take allowance tokens.
+    pub own_nodes: Vec<NodeId>,
     /// How often the coordinator looks for accounts to warn about expiry.
     pub warning_interval: Duration,
     /// How far into a month an account that has not taken its tokens gets
@@ -44,9 +49,9 @@ impl Default for CoordinatorSettings {
     /// A check every five minutes and a snapshot every hour, as the design
     /// has it; uptime over one day; a speed test every hour, with bandwidth
     /// over a week; nodes lost after a week of silence, counted over 90
-    /// days; records at most ten minutes off; 10 GB
-    /// of tokens per account and month; warnings a week into the month and
-    /// three days before the end, looked for every hour.
+    /// days; records at most ten minutes off; 40 allowance tokens per account
+    /// and month, and no own nodes; warnings a week into the month and three
+    /// days before the end, looked for every hour.
     fn default() -> Self {
         CoordinatorSettings {
             probe_interval: Duration::from_secs(5 * 60),
@@ -57,7 +62,8 @@ impl Default for CoordinatorSettings {
             lost_after: Duration::from_secs(7 * 24 * 60 * 60),
             loss_window: Duration::from_secs(90 * 24 * 60 * 60),
             max_record_age: Duration::from_secs(10 * 60),
-            monthly_allowance: 100,
+            monthly_allowance: 40,
+            own_nodes: Vec::new(),
             warning_interval: Duration::from_secs(60 * 60),
             first_warning_after: Duration::from_secs(7 * 24 * 60 * 60),
             final_warning_before: Duration::from_secs(3 * 24 * 60 * 60),

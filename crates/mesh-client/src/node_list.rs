@@ -150,6 +150,7 @@ mod tests {
             uptime_permille,
             bandwidth_bits_per_second: None,
             used_bytes: None,
+            takes_allowance: false,
         }
     }
 

@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mesh_core::NodeId;
 use mesh_core::node_list::NodeRecord;
 use mesh_core::prices::PRICES_ROUTE;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
@@ -36,8 +37,10 @@ pub struct Coordinator {
     pub http: reqwest::Client,
     /// How far a record's signing time may be from now, in seconds.
     pub max_record_age_seconds: u64,
-    /// The tokens each account gets per month.
+    /// The allowance tokens each account gets per month.
     pub monthly_allowance: u64,
+    /// The nodes the coordinator runs, which take allowance tokens.
+    pub own_nodes: Arc<Vec<NodeId>>,
 }
 
 /// The router of `coordinator`.

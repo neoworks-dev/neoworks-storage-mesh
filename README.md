@@ -14,16 +14,16 @@ it into erasure-coded pieces and spread those over independent nodes.
   Nodes also keep signed pointers, small records under an owner's public key
   that say where the newest version of something is.
 - **Coordinators** track the network, never anyone's data: the list of nodes
-  and their reliability, the storage allowance of each account, the list of
-  spent tokens, and sign-in. NeoWorks runs the first ones; the set of
-  coordinators is a signed list that can grow into a federation.
+  with their reliability and speed, what storage costs on them, each
+  account's token balance and free allowance, the list of spent tokens, and
+  sign-in. NeoWorks runs the first ones; the set of coordinators is a signed
+  list that can grow into a federation.
 
 ## Status
 
-Early. A file is cut into chunks where its content says, each encrypted
-under a key derived from its bytes, so a chunk you
-already stored is never stored again: an edited file only uploads the chunks
-that changed. The chunks are spread over nodes chosen from a list, so that no
+Early. A file is cut into chunks where its content says, each encrypted under
+a key derived from its bytes, so a chunk you already stored is never stored
+again: an edited file only uploads the chunks that changed. The chunks are spread over nodes chosen from a list, so that no
 operator, network or subnet holds more pieces of a chunk than it can lose,
 and a file can be read back while any two of a chunk's nodes are down, have
 lost their pieces or return corrupted ones. Nodes keep each piece for a lease
@@ -31,8 +31,16 @@ and delete it once the lease ends unless it is renewed, which is also how a
 file is deleted. An audit checks that the nodes still hold every piece, from
 a few random segments with Merkle proofs, and repair rebuilds lost pieces
 onto other nodes. Each node has a key of its own and registers with a
-coordinator, which checks that nodes are up and publishes a signed list of
-them. There are no tokens yet; the issues track what comes next.
+coordinator, which checks that nodes are up, measures how fast they are and
+publishes a signed list of them.
+
+Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
+nodes and coordinators can't tell whose they are. Nodes never set prices:
+coordinators put each node in a class by its uptime and speed and move each
+class's price once a day by how full it is. Every account gets a free
+allowance each month, which only the coordinator's own nodes take, and buys
+more. Tokens can never be turned back into money. The issues track what
+comes next.
 
 ## Layout
 

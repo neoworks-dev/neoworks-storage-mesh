@@ -1,12 +1,14 @@
-//! Issuing storage tokens with blind signatures and keeping the spent list,
-//! in `<data>/tokens.sqlite3`.
+//! Issuing storage tokens with blind signatures, the accounts' balances, and
+//! the spent list, in `<data>/tokens.sqlite3`.
 //!
-//! The coordinator makes one RSA key per token month, the first time the
-//! month is asked for. Per account and month it counts how many tokens it
-//! signed, which is all it learns: the messages it signs are blinded, so it
-//! cannot tell later which token it issued to whom. Spending records the
-//! token's message, so no token is spent twice; a month's spent list is
-//! deleted once its tokens can no longer be spent.
+//! The coordinator makes one RSA key per token month and kind, the first
+//! time it is asked for. Paid tokens come out of an account's balance, which
+//! buying and hosting fill; allowance tokens are free up to the monthly
+//! allowance. Per account, month and kind the coordinator counts how many
+//! tokens it signed, which is all it learns: the messages it signs are
+//! blinded, so it cannot tell later which token it issued to whom. Spending
+//! records the token's message, so no token is spent twice; a month's spent
+//! list is deleted once its tokens can no longer be spent.
 
 use std::path::Path;
 
@@ -14,14 +16,14 @@ use blind_rsa_signatures::{
     BlindMessage, DefaultRng, KeyPairSha384PSSRandomized, SecretKeySha384PSSRandomized,
 };
 use mesh_core::sign_in::normalize_email;
-use mesh_core::tokens::{HexBytes, Token};
+use mesh_core::tokens::{HexBytes, Token, TokenKind};
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 /// The size of each month's RSA key. RFC 9474 asks for at least 2048 bits.
 const KEY_BITS: usize = 2048;
 
-/// Token keys, issued counts and spent tokens.
+/// Token keys, balances, issued counts and spent tokens.
 pub struct TokenIssuer {
     connection: Mutex<Connection>,
 }
@@ -29,8 +31,10 @@ pub struct TokenIssuer {
 /// Why tokens could not be issued.
 #[derive(Debug, thiserror::Error)]
 pub enum IssueError {
-    #[error("the account has {left} tokens left this month")]
+    #[error("the account has {left} allowance tokens left this month")]
     OverAllowance { left: u64 },
+    #[error("the account's balance holds {balance} tokens")]
+    OverBalance { balance: u64 },
     #[error("a blinded message is not one this key can sign")]
     BadBlindMessage,
     #[error("token keys: {0}")]
@@ -55,16 +59,23 @@ impl TokenIssuer {
     pub fn open(directory: &Path) -> rusqlite::Result<Self> {
         let connection = Connection::open(directory.join("tokens.sqlite3"))?;
         connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS month_key (
-                 month      INTEGER PRIMARY KEY,
+            "CREATE TABLE IF NOT EXISTS token_key (
+                 month      INTEGER NOT NULL,
+                 kind       TEXT NOT NULL,
                  secret_key BLOB NOT NULL,
-                 public_key BLOB NOT NULL
+                 public_key BLOB NOT NULL,
+                 PRIMARY KEY (month, kind)
              );
-             CREATE TABLE IF NOT EXISTS issued (
+             CREATE TABLE IF NOT EXISTS issued_tokens (
                  email TEXT NOT NULL,
                  month INTEGER NOT NULL,
+                 kind  TEXT NOT NULL,
                  count INTEGER NOT NULL,
-                 PRIMARY KEY (email, month)
+                 PRIMARY KEY (email, month, kind)
+             );
+             CREATE TABLE IF NOT EXISTS balance (
+                 email  TEXT PRIMARY KEY,
+                 tokens INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS spent (
                  month   INTEGER NOT NULL,
@@ -77,74 +88,99 @@ impl TokenIssuer {
         })
     }
 
-    /// The public key of `month` in DER, made the first time it is asked for.
-    pub async fn public_key(&self, month: u64) -> Result<Vec<u8>, IssueError> {
+    /// The public key of `month` and `kind` in DER, made the first time it is
+    /// asked for.
+    pub async fn public_key(&self, month: u64, kind: TokenKind) -> Result<Vec<u8>, IssueError> {
         let connection = self.connection.lock().await;
-        let (_, public_key) = key_of(&connection, month)?;
+        let (_, public_key) = key_of(&connection, month, kind)?;
         Ok(public_key)
     }
 
-    /// Signs `blinded` for `email` in `month`, if the account has that many
-    /// tokens of its `allowance` left. The caller has checked the sign-in.
+    /// Adds `tokens` to the balance of `email`, for tokens bought or earned.
+    pub async fn credit(&self, email: &str, tokens: u64) -> rusqlite::Result<u64> {
+        let connection = self.connection.lock().await;
+        connection.query_row(
+            "INSERT INTO balance (email, tokens) VALUES (?1, ?2)
+             ON CONFLICT (email) DO UPDATE SET tokens = tokens + excluded.tokens
+             RETURNING tokens",
+            params![normalize_email(email), tokens],
+            |row| row.get(0),
+        )
+    }
+
+    /// The paid tokens `email` can still take.
+    #[cfg(test)]
+    pub async fn balance(&self, email: &str) -> rusqlite::Result<u64> {
+        let connection = self.connection.lock().await;
+        balance_of(&connection, &normalize_email(email))
+    }
+
+    /// Signs `blinded` as tokens of `kind` for `email` in `month`, if the
+    /// account has that many left: of its `allowance` for allowance tokens,
+    /// of its balance for paid ones. The caller has checked the sign-in.
     pub async fn issue(
         &self,
         email: &str,
         month: u64,
+        kind: TokenKind,
         blinded: &[HexBytes],
         allowance: u64,
     ) -> Result<Vec<HexBytes>, IssueError> {
-        let connection = self.connection.lock().await;
+        let mut connection = self.connection.lock().await;
         let email = normalize_email(email);
-        let issued: u64 = connection
-            .query_row(
-                "SELECT count FROM issued WHERE email = ?1 AND month = ?2",
-                params![email, month],
-                |row| row.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        let left = allowance.saturating_sub(issued);
-        if blinded.len() as u64 > left {
-            return Err(IssueError::OverAllowance { left });
+        let count = blinded.len() as u64;
+        // One transaction, so the balance is taken only if the tokens are
+        // signed, and the other way round.
+        let transaction = connection.transaction()?;
+        match kind {
+            TokenKind::Allowance => {
+                let left =
+                    allowance.saturating_sub(issued_count(&transaction, &email, month, kind)?);
+                if count > left {
+                    return Err(IssueError::OverAllowance { left });
+                }
+            }
+            TokenKind::Paid => {
+                let balance = balance_of(&transaction, &email)?;
+                if count > balance {
+                    return Err(IssueError::OverBalance { balance });
+                }
+                transaction.execute(
+                    "UPDATE balance SET tokens = tokens - ?2 WHERE email = ?1",
+                    params![email, count],
+                )?;
+            }
         }
-        let (secret_key, _) = key_of(&connection, month)?;
-        let secret_key = SecretKeySha384PSSRandomized::from_der(&secret_key)
-            .map_err(|error| IssueError::Key(error.to_string()))?;
-        let mut signatures = Vec::with_capacity(blinded.len());
-        for message in blinded {
-            let signature = secret_key
-                .blind_sign(BlindMessage(message.0.clone()))
-                .map_err(|_| IssueError::BadBlindMessage)?;
-            signatures.push(HexBytes(signature.0));
-        }
-        connection.execute(
-            "INSERT INTO issued (email, month, count) VALUES (?1, ?2, ?3)
-             ON CONFLICT (email, month) DO UPDATE SET count = count + excluded.count",
-            params![email, month, blinded.len() as u64],
+        let signatures = sign_blinded(&transaction, month, kind, blinded)?;
+        transaction.execute(
+            "INSERT INTO issued_tokens (email, month, kind, count) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (email, month, kind) DO UPDATE SET count = count + excluded.count",
+            params![email, month, kind.as_str(), count],
         )?;
+        transaction.commit()?;
         Ok(signatures)
     }
 
     /// The accounts that took tokens in the month before `month` but none in
-    /// `month`: their data runs out unless they pay again.
+    /// `month`: their data runs out unless they take tokens again.
     pub async fn lapsed_accounts(&self, month: u64) -> rusqlite::Result<Vec<String>> {
         let connection = self.connection.lock().await;
         let mut statement = connection.prepare(
-            "SELECT email FROM issued WHERE month + 1 = ?1
-             AND email NOT IN (SELECT email FROM issued WHERE month = ?1)
+            "SELECT DISTINCT email FROM issued_tokens WHERE month + 1 = ?1
+             AND email NOT IN (SELECT email FROM issued_tokens WHERE month = ?1)
              ORDER BY email",
         )?;
         let emails = statement.query_map(params![month], |row| row.get(0))?;
         emails.collect()
     }
 
-    /// Notes that `email` took `count` tokens in `month`, without signing
-    /// anything; for tests of what follows from issued counts.
+    /// Notes that `email` took `count` paid tokens in `month`, without
+    /// signing anything; for tests of what follows from issued counts.
     #[cfg(test)]
     pub async fn record_issued(&self, email: &str, month: u64, count: u64) -> rusqlite::Result<()> {
         let connection = self.connection.lock().await;
         connection.execute(
-            "INSERT INTO issued (email, month, count) VALUES (?1, ?2, ?3)",
+            "INSERT INTO issued_tokens (email, month, kind, count) VALUES (?1, ?2, 'paid', ?3)",
             params![email, month, count],
         )?;
         Ok(())
@@ -158,7 +194,7 @@ impl TokenIssuer {
         if !is_valid_month {
             return Ok(Spent::Invalid);
         }
-        let (_, public_key) = key_of(&connection, token.month)?;
+        let (_, public_key) = key_of(&connection, token.month, token.kind)?;
         if !token.is_signed_by(&public_key) {
             return Ok(Spent::Invalid);
         }
@@ -180,12 +216,66 @@ impl TokenIssuer {
     }
 }
 
-/// The secret and public key of `month` in DER, made if there is none yet.
-fn key_of(connection: &Connection, month: u64) -> Result<(Vec<u8>, Vec<u8>), IssueError> {
+/// How many tokens of `kind` `email` took in `month`.
+fn issued_count(
+    connection: &Connection,
+    email: &str,
+    month: u64,
+    kind: TokenKind,
+) -> rusqlite::Result<u64> {
+    Ok(connection
+        .query_row(
+            "SELECT count FROM issued_tokens WHERE email = ?1 AND month = ?2 AND kind = ?3",
+            params![email, month, kind.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// The balance of the normalized `email`.
+fn balance_of(connection: &Connection, email: &str) -> rusqlite::Result<u64> {
+    Ok(connection
+        .query_row(
+            "SELECT tokens FROM balance WHERE email = ?1",
+            params![email],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0))
+}
+
+/// The blind signatures on `blinded` with the key of `month` and `kind`.
+fn sign_blinded(
+    connection: &Connection,
+    month: u64,
+    kind: TokenKind,
+    blinded: &[HexBytes],
+) -> Result<Vec<HexBytes>, IssueError> {
+    let (secret_key, _) = key_of(connection, month, kind)?;
+    let secret_key = SecretKeySha384PSSRandomized::from_der(&secret_key)
+        .map_err(|error| IssueError::Key(error.to_string()))?;
+    let mut signatures = Vec::with_capacity(blinded.len());
+    for message in blinded {
+        let signature = secret_key
+            .blind_sign(BlindMessage(message.0.clone()))
+            .map_err(|_| IssueError::BadBlindMessage)?;
+        signatures.push(HexBytes(signature.0));
+    }
+    Ok(signatures)
+}
+
+/// The secret and public key of `month` and `kind` in DER, made if there is
+/// none yet.
+fn key_of(
+    connection: &Connection,
+    month: u64,
+    kind: TokenKind,
+) -> Result<(Vec<u8>, Vec<u8>), IssueError> {
     let held = connection
         .query_row(
-            "SELECT secret_key, public_key FROM month_key WHERE month = ?1",
-            params![month],
+            "SELECT secret_key, public_key FROM token_key WHERE month = ?1 AND kind = ?2",
+            params![month, kind.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -203,8 +293,51 @@ fn key_of(connection: &Connection, month: u64) -> Result<(Vec<u8>, Vec<u8>), Iss
         .to_der()
         .map_err(|error| IssueError::Key(error.to_string()))?;
     connection.execute(
-        "INSERT INTO month_key (month, secret_key, public_key) VALUES (?1, ?2, ?3)",
-        params![month, secret_key, public_key],
+        "INSERT INTO token_key (month, kind, secret_key, public_key) VALUES (?1, ?2, ?3, ?4)",
+        params![month, kind.as_str(), secret_key, public_key],
     )?;
     Ok((secret_key, public_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn issuer() -> (tempfile::TempDir, TokenIssuer) {
+        let directory = tempfile::tempdir().unwrap();
+        let issuer = TokenIssuer::open(directory.path()).unwrap();
+        (directory, issuer)
+    }
+
+    #[tokio::test]
+    async fn paid_tokens_come_out_of_the_balance() {
+        let (_directory, issuer) = issuer();
+        assert_eq!(issuer.credit("Ana@Example.org", 3).await.unwrap(), 3);
+        // Not valid blinded messages, but the balance is checked first.
+        let four = vec![HexBytes(vec![1]); 4];
+
+        let result = issuer
+            .issue("ana@example.org", 1, TokenKind::Paid, &four, 0)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(IssueError::OverBalance { balance: 3 })
+        ));
+        assert_eq!(issuer.balance("ana@example.org").await.unwrap(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_refused_signature_takes_nothing_from_the_balance() {
+        let (_directory, issuer) = issuer();
+        issuer.credit("ana@example.org", 3).await.unwrap();
+        let not_blinded = vec![HexBytes(vec![1])];
+
+        let result = issuer
+            .issue("ana@example.org", 1, TokenKind::Paid, &not_blinded, 0)
+            .await;
+
+        assert!(matches!(result, Err(IssueError::BadBlindMessage)));
+        assert_eq!(issuer.balance("ana@example.org").await.unwrap(), 3);
+    }
 }

@@ -22,10 +22,12 @@ use mesh_core::protocol::{
     MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, NodeIdentity, PIECE_ROUTE, POINTER_ROUTE,
     PointerConflict,
 };
+use mesh_core::signed::SigningKey;
 use mesh_core::tabs::StoreQuery;
-use mesh_core::{PieceId, merkle};
+use mesh_core::{NodeId, PieceId, merkle};
 
 use crate::clock::unix_now;
+use crate::own_price::OwnPrice;
 use crate::piece_store::{PieceStore, StoreError};
 use crate::pointer_store::{PointerPut, PointerStore, PointerStoreError};
 use crate::settings::NodeSettings;
@@ -44,13 +46,18 @@ pub(crate) struct Node {
     pub(crate) max_lease_seconds: u64,
     /// The coordinator tokens are spent at, when the node requires them.
     pub(crate) token_coordinator: Option<String>,
+    /// The node's price there, when the node requires tokens.
+    pub(crate) price: Option<Arc<OwnPrice>>,
+    /// Signs the node's token spends, so the coordinator knows which node
+    /// spent them.
+    pub(crate) key: SigningKey,
     /// For spending tokens at the coordinator.
     pub(crate) http: reqwest::Client,
     pub(crate) speed_tests: Arc<SpeedTests>,
     pub(crate) usage: Arc<UsageCount>,
 }
 
-/// The router of the node `identity`, serving `store`, `pointers` and
+/// The router of the node with `key`, serving `store`, `pointers` and
 /// `tabs`.
 ///
 /// Ids that are not 64 lowercase hex digits and requests without
@@ -60,9 +67,22 @@ pub fn router(
     store: Arc<PieceStore>,
     pointers: Arc<PointerStore>,
     tabs: Arc<TabBook>,
-    identity: NodeIdentity,
+    key: SigningKey,
     settings: &NodeSettings,
 ) -> Router {
+    let public_key = key.verifying_key().to_bytes();
+    let identity = NodeIdentity {
+        node_id: NodeId::of(&public_key),
+        public_key,
+    };
+    let http = reqwest::Client::new();
+    let price = settings.require_tokens.as_ref().map(|coordinator| {
+        Arc::new(OwnPrice::new(
+            coordinator.clone(),
+            identity.node_id,
+            http.clone(),
+        ))
+    });
     let node = Node {
         store,
         pointers,
@@ -70,7 +90,9 @@ pub fn router(
         identity: Arc::new(identity),
         max_lease_seconds: settings.max_lease.as_secs(),
         token_coordinator: settings.require_tokens.clone(),
-        http: reqwest::Client::new(),
+        price,
+        key,
+        http,
         speed_tests: Arc::new(SpeedTests::new()),
         usage: Arc::new(UsageCount::default()),
     };

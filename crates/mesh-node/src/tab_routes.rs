@@ -4,6 +4,11 @@
 //! The node takes tokens on trust only after spending them at the
 //! coordinator: a token that was forged, is from an ended month or was spent
 //! before comes back refused there, so the node needs no token keys itself.
+//! It signs each spend with its key, so the coordinator knows which node
+//! took the token.
+//!
+//! Each token adds its value to the tab. A piece stored against the tab costs
+//! its size at the node's published price until the tab ends.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -11,10 +16,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use mesh_core::protocol::{BatchRenewRequest, BatchRenewResponse, MAX_BATCH_PIECES};
+use mesh_core::signed::Signed;
 use mesh_core::tabs::{
-    MAX_TOKENS_PER_REQUEST, OpenTabRequest, TAB_PIECES_ROUTE, TAB_ROUTE, is_tab_name,
+    MAX_TOKENS_PER_REQUEST, OpenTabRequest, TAB_PIECES_ROUTE, TAB_ROUTE, is_tab_name, storage_cost,
 };
-use mesh_core::tokens::{MONTH_SECONDS, SPEND_ROUTE, SpendResponse, TOKEN_BYTES, Token};
+use mesh_core::tokens::{
+    MICROTOKENS_PER_TOKEN, MONTH_SECONDS, SPEND_ROUTE, SpendRequest, SpendResponse, Token,
+};
 
 use crate::clock::unix_now;
 use crate::routes::{Node, internal_error};
@@ -50,7 +58,7 @@ async fn pay_tab(
     };
     let mut paid = 0;
     for token in &request.tokens {
-        if spend(&node.http, coordinator, token).await {
+        if spend(&node, coordinator, token).await {
             paid += 1;
         }
     }
@@ -64,7 +72,12 @@ async fn pay_tab(
     let now = unix_now();
     match node
         .tabs
-        .pay(&name, paid * TOKEN_BYTES, now + MONTH_SECONDS, now)
+        .pay(
+            &name,
+            paid * MICROTOKENS_PER_TOKEN,
+            now + MONTH_SECONDS,
+            now,
+        )
         .await
     {
         Ok(tab) => Json(tab).into_response(),
@@ -75,14 +88,20 @@ async fn pay_tab(
     }
 }
 
-/// Whether `token` was valid and is now spent at `coordinator`. A token the
-/// coordinator could not be asked about counts as unpaid; the client keeps
-/// it and may try again.
-async fn spend(http: &reqwest::Client, coordinator: &str, token: &Token) -> bool {
+/// Whether `token` was valid and is now spent at `coordinator` for this
+/// node. A token the coordinator could not be asked about counts as unpaid;
+/// the client keeps it and may try again.
+async fn spend(node: &Node, coordinator: &str, token: &Token) -> bool {
     let url = format!("{}{SPEND_ROUTE}", coordinator.trim_end_matches('/'));
-    // A token is plain integers and bytes, which always serialize.
-    let body = serde_json::to_vec(token).expect("a token serializes");
-    let Ok(response) = http
+    let request = SpendRequest {
+        node_id: node.identity.node_id,
+        token: token.clone(),
+    };
+    // A request is plain integers and bytes, which always serialize.
+    let body =
+        serde_json::to_vec(&Signed::sign(&node.key, request)).expect("a spend request serializes");
+    let Ok(response) = node
+        .http
         .post(url)
         .header("content-type", "application/json")
         .body(body)
@@ -131,21 +150,43 @@ async fn move_into_tab(
     Json(BatchRenewResponse { lease_ends }).into_response()
 }
 
-/// Charges `len` bytes to the tab `name` and returns when it ends, or the
-/// status and reason that refuse the charge.
+/// Charges keeping `len` bytes until the tab `name` ends to the tab, at the
+/// node's price, and returns when it ends; or the status and reason that
+/// refuse the charge.
 pub(crate) async fn charge(node: &Node, name: &str, len: u64) -> Result<u64, (StatusCode, String)> {
     let refused = |status, reason: &str| Err((status, reason.to_string()));
-    match node.tabs.charge(name, len, unix_now()).await {
+    let Some(price) = own_price(node).await else {
+        let reason = "the coordinator lists no price for this node yet";
+        return refused(StatusCode::SERVICE_UNAVAILABLE, reason);
+    };
+    let now = unix_now();
+    let expires_at = match node.tabs.end_of(name, now).await {
+        Ok(Some(expires_at)) => expires_at,
+        Ok(None) => return refused(StatusCode::PAYMENT_REQUIRED, "no open tab of that name"),
+        Err(error) => return database_error(name, error),
+    };
+    let cost = storage_cost(len, price, expires_at - now);
+    match node.tabs.charge(name, cost, now).await {
         Ok(Ok(expires_at)) => Ok(expires_at),
+        // The tab ended between looking up its end and charging it.
         Ok(Err(ChargeRefused::NoTab)) => {
             refused(StatusCode::PAYMENT_REQUIRED, "no open tab of that name")
         }
-        Ok(Err(ChargeRefused::Full)) => {
-            refused(StatusCode::INSUFFICIENT_STORAGE, "the tab is full")
-        }
-        Err(error) => {
-            eprintln!("tab {name}: {error}");
-            refused(StatusCode::INTERNAL_SERVER_ERROR, "")
-        }
+        Ok(Err(ChargeRefused::Empty)) => refused(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "the tab's balance does not cover the piece",
+        ),
+        Err(error) => database_error(name, error),
     }
+}
+
+/// The node's price, when it takes tokens and the coordinator lists one.
+async fn own_price(node: &Node) -> Option<u64> {
+    node.price.as_ref()?.tokens_per_tb_month().await
+}
+
+/// A tab book error: logged on the node, answered without detail.
+fn database_error<T>(name: &str, error: rusqlite::Error) -> Result<T, (StatusCode, String)> {
+    eprintln!("tab {name}: {error}");
+    Err((StatusCode::INTERNAL_SERVER_ERROR, String::new()))
 }

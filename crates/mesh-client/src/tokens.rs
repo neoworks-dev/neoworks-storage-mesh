@@ -11,7 +11,7 @@ use blind_rsa_signatures::{BlindSignature, DefaultRng, PublicKeySha384PSSRandomi
 use mesh_core::node_list::{CoordinatorList, TrustError};
 use mesh_core::signed::Signed;
 use mesh_core::tokens::{
-    HexBytes, ISSUE_ROUTE, IssueRequest, IssueResponse, TOKEN_KEY_ROUTE, Token, TokenKey,
+    HexBytes, ISSUE_ROUTE, IssueRequest, IssueResponse, Token, TokenKey, TokenKind, token_key_path,
 };
 use reqwest::StatusCode;
 
@@ -32,14 +32,19 @@ pub enum TokenError {
     UnexpectedAnswer,
 }
 
-/// The current month's token key, once a coordinator on `coordinators` is
-/// found to have signed it.
+/// The current month's token key of `kind`, once a coordinator on
+/// `coordinators` is found to have signed it.
 pub async fn token_key(
     client: &NodeClient,
     coordinator: &str,
     coordinators: &CoordinatorList,
+    kind: TokenKind,
 ) -> Result<TokenKey, TokenError> {
-    let url = format!("{}{TOKEN_KEY_ROUTE}", coordinator.trim_end_matches('/'));
+    let url = format!(
+        "{}{}",
+        coordinator.trim_end_matches('/'),
+        token_key_path(kind)
+    );
     let response = client.http().get(url).send().await?;
     if !response.status().is_success() {
         return Err(refused(response).await);
@@ -48,20 +53,26 @@ pub async fn token_key(
     let key: Signed<TokenKey> =
         serde_json::from_slice(&body).map_err(|_| TokenError::UnexpectedAnswer)?;
     coordinators.check_signed(&key)?;
+    // A key of another kind would sign tokens the nodes take as this kind.
+    if key.body.kind != kind {
+        return Err(TokenError::UnexpectedAnswer);
+    }
     Ok(key.body)
 }
 
-/// `count` new tokens of this month for the account `email`, proven with
-/// its `auth_key`.
+/// `count` new tokens of `kind` and this month for the account `email`,
+/// proven with its `auth_key`: allowance tokens from its monthly allowance,
+/// paid ones from its balance.
 pub async fn get_tokens(
     client: &NodeClient,
     coordinator: &str,
     coordinators: &CoordinatorList,
     email: &str,
     auth_key: [u8; 32],
+    kind: TokenKind,
     count: usize,
 ) -> Result<Vec<Token>, TokenError> {
-    let key = token_key(client, coordinator, coordinators).await?;
+    let key = token_key(client, coordinator, coordinators, kind).await?;
     let public_key = PublicKeySha384PSSRandomized::from_der(&key.public_key)
         .map_err(|_| TokenError::UnexpectedAnswer)?;
     let mut messages = Vec::with_capacity(count);
@@ -79,6 +90,7 @@ pub async fn get_tokens(
         email: email.to_string(),
         auth_key,
         month: key.month,
+        kind,
         blinded: blindings
             .iter()
             .map(|blinding| HexBytes(blinding.blind_message.0.clone()))
@@ -104,6 +116,7 @@ pub async fn get_tokens(
             .ok_or(TokenError::UnexpectedAnswer)?;
         tokens.push(Token {
             month: key.month,
+            kind,
             message,
             randomizer: randomizer.0,
             signature: signature.0,

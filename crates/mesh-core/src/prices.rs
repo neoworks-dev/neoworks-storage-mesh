@@ -239,6 +239,7 @@ mod tests {
             uptime_permille,
             bandwidth_bits_per_second: bits_per_second,
             used_bytes: Some(used),
+            takes_allowance: false,
         }
     }
 

@@ -2,9 +2,9 @@
 //!
 //! Data in the mesh is deleted as soon as nobody pays for it, and nodes cannot
 //! warn anyone, since they see only anonymous tabs. The coordinator can: it
-//! knows each account's email and whether the account took its tokens this
+//! knows each account's email and whether the account took tokens this
 //! month. Tokens are signed blind, so it cannot tell which data is whose,
-//! only that an account stopped paying, which is enough to warn.
+//! only that an account stopped taking tokens, which is enough to warn.
 //!
 //! An account that took tokens last month and none this month gets a first
 //! warning once the month is [`CoordinatorSettings::first_warning_after`]
@@ -125,16 +125,19 @@ impl ExpiryWarnings {
     ) -> std::io::Result<()> {
         let date = utc_date(expires_at);
         let subject = match kind {
-            WarningKind::First => format!("Your NeoWorks storage expires on {date}"),
-            WarningKind::Final => format!("Last reminder: your NeoWorks storage expires on {date}"),
+            WarningKind::First => format!("Your storage in the mesh expires on {date}"),
+            WarningKind::Final => {
+                format!("Last reminder: your storage in the mesh expires on {date}")
+            }
         };
         let body = format!(
             "Hello,\n\n\
-             your account has not taken its storage tokens this month, for example\n\
-             because a payment failed. Everything you keep in the mesh is deleted\n\
-             on {date} unless the account pays again before then.\n\n\
-             NeoWorks cannot see what you store, so this message is all we can tell\n\
-             you about it.\n"
+             your account has not taken any storage tokens this month, for example\n\
+             because its balance and its free allowance are used up. Everything you\n\
+             keep in the mesh is deleted on {date} unless the account takes tokens\n\
+             again before then.\n\n\
+             We cannot see what you store, so this message is all we can tell you\n\
+             about it.\n"
         );
         let message = format!("To: {email}\r\nSubject: {subject}\r\n\r\n{body}");
         let name = format!(

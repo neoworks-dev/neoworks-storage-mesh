@@ -11,9 +11,10 @@
 //!
 //! People also sign in here with an email and a password; the coordinator
 //! keeps only what checks a sign-in and the account's secret locked under a
-//! key it never sees. Signed-in accounts get their monthly allowance of
-//! storage tokens, signed blind, and the coordinator keeps the list of spent
-//! ones. An account that stops taking tokens gets warned by email before its
+//! key it never sees. Signed-in accounts take tokens, signed blind: free
+//! allowance tokens each month, which only the coordinator's own nodes take,
+//! and paid ones out of their balance. The coordinator keeps the list of
+//! spent ones. An account that stops taking tokens gets warned by email before its
 //! data expires. The `mesh-coordinator` binary runs
 //! one; tests start coordinators in-process through [`serve`].
 
@@ -114,6 +115,13 @@ impl CoordinatorData {
     pub fn public_key(&self) -> CoordinatorKey {
         CoordinatorKey(self.key.verifying_key().to_bytes())
     }
+
+    /// Adds `tokens` to the paid balance of the account `email` and returns
+    /// the new balance. This is where bought tokens come in until billing
+    /// exists.
+    pub async fn credit(&self, email: &str, tokens: u64) -> rusqlite::Result<u64> {
+        self.tokens.credit(email, tokens).await
+    }
 }
 
 /// Serves `data` on `listener`, checks nodes and publishes snapshots, until
@@ -142,6 +150,7 @@ pub async fn serve(
         http: http.clone(),
         max_record_age_seconds: settings.max_record_age.as_secs(),
         monthly_allowance: settings.monthly_allowance,
+        own_nodes: Arc::new(settings.own_nodes.clone()),
     };
     let server = axum::serve(listener, routes::router(coordinator));
     // All of them run on this task, so stopping the coordinator stops them all.
