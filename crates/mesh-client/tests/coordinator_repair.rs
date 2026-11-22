@@ -144,8 +144,12 @@ async fn a_chunk_without_a_spare_is_repaired_at_once() {
     let (_data, coordinator, coordinators) = start_coordinator(hour, None).await;
     let (nodes, list) =
         start_registered_nodes(&coordinator, &coordinators, 8, NodeSettings::default()).await;
-    let file = random_file(1_500_000, 21);
+    // Smaller than the smallest chunk, so the file is one chunk. With more,
+    // the nodes leaving could take only one piece of another chunk, which
+    // then waits the hour for its spare.
+    let file = random_file(200_000, 21);
     let mut manifest = store_on(&list, &file, LEASE).await.unwrap();
+    assert_eq!(manifest.chunks.len(), 1);
     let client = NodeClient::new().unwrap();
     let kept = register(&client, &coordinator, &manifest, now() + 3_600)
         .await
