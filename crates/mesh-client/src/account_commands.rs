@@ -133,6 +133,7 @@ pub async fn store(
         account: &account,
         device: arguments.device.clone(),
         lease,
+        coordinator: arguments.nodes.source.coordinator.as_deref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;
@@ -196,6 +197,7 @@ pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> any
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
+        coordinator: arguments.nodes.source.coordinator.as_deref(),
     };
     let mut index = read_index(&arguments.index)?;
     let renewal = index.renew(&session).await?;
@@ -228,6 +230,7 @@ async fn pulled_index(
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
+        coordinator: arguments.nodes.source.coordinator.as_deref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;
