@@ -5,9 +5,9 @@ mod fake_bucket;
 
 use fake_bucket::FakeStore;
 use mesh_core::PieceId;
-use mesh_core::merkle::{self, SEGMENT_BYTES};
+use mesh_core::merkle::{self, GROUP_SEGMENTS, SEGMENT_BYTES};
 use mesh_core::protocol::{ChallengeRequest, ChallengeResponse, NodeUsage, USAGE_ROUTE};
-use mesh_node::{Bucket, NodeData, NodeSettings, PieceStore};
+use mesh_node::{Bucket, ChallengeAnswer, NodeData, NodeSettings, PieceStore};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -66,6 +66,110 @@ async fn ended_pieces_leave_the_bucket_in_one_request() {
         pieces.get(&PieceId::of(&kept), 200).await.unwrap(),
         Some(kept)
     );
+}
+
+/// A piece store keeping pieces in the bucket `node-1` of `store`, with its
+/// leases in `directory`.
+async fn bucket_store(store: &FakeStore, directory: &TempDir) -> PieceStore {
+    let bucket = Bucket::new(store.settings("node-1")).unwrap();
+    PieceStore::open_with_bucket(directory.path(), bucket)
+        .await
+        .unwrap()
+}
+
+/// The object bytes `store` has sent so far.
+fn bytes_sent(store: &FakeStore) -> usize {
+    store.contents.lock().unwrap().bytes_sent
+}
+
+#[tokio::test]
+async fn a_challenge_reads_only_the_groups_of_its_segments() {
+    let store = FakeStore::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let pieces = bucket_store(&store, &directory).await;
+    let bytes = piece_bytes(100 * SEGMENT_BYTES - 5, 3);
+    let id = PieceId::of(&bytes);
+    pieces.put(&id, &bytes, 1_000).await.unwrap();
+    let before = bytes_sent(&store);
+
+    // Segments 70 and 75 share group 4; segment 5 is in group 0.
+    let answer = pieces.prove(&id, &[70, 5, 75], 0).await.unwrap();
+
+    let expected = [70, 5, 75].map(|index| merkle::prove(&bytes, index).unwrap());
+    assert_eq!(answer, ChallengeAnswer::Proofs(expected.to_vec()));
+    assert_eq!(
+        bytes_sent(&store) - before,
+        2 * GROUP_SEGMENTS * SEGMENT_BYTES
+    );
+}
+
+#[tokio::test]
+async fn a_challenge_reads_a_short_last_group_and_an_empty_piece() {
+    let store = FakeStore::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let pieces = bucket_store(&store, &directory).await;
+    let short = piece_bytes(20 * SEGMENT_BYTES + 1, 4);
+    let empty = Vec::new();
+    pieces
+        .put(&PieceId::of(&short), &short, 1_000)
+        .await
+        .unwrap();
+    pieces
+        .put(&PieceId::of(&empty), &empty, 1_000)
+        .await
+        .unwrap();
+
+    let last = pieces.prove(&PieceId::of(&short), &[20], 0).await.unwrap();
+    let only = pieces.prove(&PieceId::of(&empty), &[0], 0).await.unwrap();
+
+    let expected = merkle::prove(&short, 20).unwrap();
+    assert_eq!(last, ChallengeAnswer::Proofs(vec![expected]));
+    let expected = merkle::prove(&empty, 0).unwrap();
+    assert_eq!(only, ChallengeAnswer::Proofs(vec![expected]));
+}
+
+#[tokio::test]
+async fn a_challenge_beyond_the_piece_or_its_lease_reads_nothing() {
+    let store = FakeStore::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let pieces = bucket_store(&store, &directory).await;
+    let bytes = piece_bytes(3 * SEGMENT_BYTES, 5);
+    let id = PieceId::of(&bytes);
+    pieces.put(&id, &bytes, 1_000).await.unwrap();
+    let before = bytes_sent(&store);
+
+    let beyond = pieces.prove(&id, &[0, 3], 0).await.unwrap();
+    let ended = pieces.prove(&id, &[0], 1_000).await.unwrap();
+
+    let no_segment = ChallengeAnswer::NoSegment {
+        index: 3,
+        segment_count: 3,
+    };
+    assert_eq!(beyond, no_segment);
+    assert_eq!(ended, ChallengeAnswer::NotHeld);
+    assert_eq!(bytes_sent(&store), before);
+}
+
+#[tokio::test]
+async fn a_piece_without_group_hashes_is_proven_from_all_of_it() {
+    let store = FakeStore::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let pieces = bucket_store(&store, &directory).await;
+    let bytes = piece_bytes(40 * SEGMENT_BYTES, 6);
+    let id = PieceId::of(&bytes);
+    pieces.put(&id, &bytes, 1_000).await.unwrap();
+    // As a node stored pieces before it recorded group hashes.
+    rusqlite::Connection::open(directory.path().join("leases.sqlite3"))
+        .unwrap()
+        .execute("UPDATE lease SET group_hashes = NULL", [])
+        .unwrap();
+    let before = bytes_sent(&store);
+
+    let answer = pieces.prove(&id, &[33], 0).await.unwrap();
+
+    let expected = merkle::prove(&bytes, 33).unwrap();
+    assert_eq!(answer, ChallengeAnswer::Proofs(vec![expected]));
+    assert_eq!(bytes_sent(&store) - before, bytes.len());
 }
 
 /// A node keeping pieces in `bucket` of `store`, with its leases in

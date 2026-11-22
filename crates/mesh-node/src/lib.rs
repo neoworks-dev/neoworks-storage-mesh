@@ -35,7 +35,7 @@ pub use bucket::{Bucket, BucketError, BucketSettings};
 pub use mailbox_store::{Appended, MailboxStore};
 pub use node_data::{NodeData, OpenError};
 pub use node_key::NodeKeyError;
-pub use piece_store::{PieceStore, StoreError};
+pub use piece_store::{ChallengeAnswer, PieceStore, StoreError};
 pub use pointer_store::{PointerPut, PointerStore, PointerStoreError};
 pub use registration::{Registration, RegistrationError, register, register_forever};
 pub use routes::router;

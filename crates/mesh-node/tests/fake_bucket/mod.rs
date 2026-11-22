@@ -4,7 +4,7 @@
 //! It answers the requests `mesh_node::Bucket` sends: putting, getting whole
 //! or by range, asking an object's length, and batch deletes. It checks that
 //! every request is signed and that the signed payload hash is the body's,
-//! and counts batch deletes. The signature itself is checked against AWS's
+//! and counts batch deletes and the object bytes it sends. The signature itself is checked against AWS's
 //! own example in `bucket.rs`.
 
 use std::collections::HashMap;
@@ -26,6 +26,8 @@ pub struct Contents {
     pub objects: HashMap<(String, String), Vec<u8>>,
     /// How many batch deletes it was sent.
     pub batch_deletes: usize,
+    /// How many object bytes it answered GET and HEAD requests with.
+    pub bytes_sent: usize,
 }
 
 /// A running fake store.
@@ -108,15 +110,16 @@ async fn get_object(
     if !is_signed(&headers, &[]) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let contents = contents.lock().unwrap();
-    let Some(object) = contents.objects.get(&(bucket, key)) else {
+    let mut contents = contents.lock().unwrap();
+    let Some(object) = contents.objects.get(&(bucket, key)).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let range = headers
         .get(header::RANGE)
         .and_then(|value| value.to_str().ok());
     let Some(range) = range.and_then(|range| range.strip_prefix("bytes=")) else {
-        return object.clone().into_response();
+        contents.bytes_sent += object.len();
+        return object.into_response();
     };
     let Some((first, last)) = range.split_once('-') else {
         return StatusCode::BAD_REQUEST.into_response();
@@ -128,6 +131,7 @@ async fn get_object(
         return StatusCode::RANGE_NOT_SATISFIABLE.into_response();
     }
     let end = (last + 1).min(object.len());
+    contents.bytes_sent += end - first;
     (StatusCode::PARTIAL_CONTENT, object[first..end].to_vec()).into_response()
 }
 

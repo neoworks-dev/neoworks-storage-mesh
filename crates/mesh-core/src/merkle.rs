@@ -352,24 +352,42 @@ mod tests {
         assert!(!reshaped.leads_to(&root));
     }
 
+    /// Checks that segment `index` of `piece` proves the same from its group
+    /// as from the whole piece.
+    fn assert_group_proof_matches(piece: &[u8], groups: &[MerkleHash], index: u32) {
+        let count = segment_count(piece.len());
+        let start = index as usize / GROUP_SEGMENTS * GROUP_SEGMENTS * SEGMENT_BYTES;
+        let end = (start + GROUP_SEGMENTS * SEGMENT_BYTES).min(piece.len());
+        let from_group = prove_in_group(groups, count, &piece[start..end], index);
+        assert_eq!(
+            from_group,
+            prove(piece, index),
+            "{count} segments, segment {index}"
+        );
+    }
+
     #[test]
     fn a_proof_from_a_group_is_the_proof_from_the_whole_piece() {
-        // One group or less, exactly one, odd numbers of groups with a short
-        // last group, and a full 9 MiB piece.
-        for segments in [1, 2, 9, 16, 17, 33, 47, 80, 2304] {
+        // One group or less, exactly one, and odd numbers of groups on
+        // several levels, each with a short last group.
+        for segments in [1, 2, 9, 16, 17, 33, 47, 80, 200] {
             let piece = piece(segments * SEGMENT_BYTES - 5);
-            let count = segment_count(piece.len());
             let groups = group_hashes(&piece);
-            for index in 0..count {
-                let start = index as usize / GROUP_SEGMENTS * GROUP_SEGMENTS * SEGMENT_BYTES;
-                let end = (start + GROUP_SEGMENTS * SEGMENT_BYTES).min(piece.len());
-                let from_group = prove_in_group(&groups, count, &piece[start..end], index);
-                assert_eq!(
-                    from_group,
-                    prove(&piece, index),
-                    "{segments} segments, segment {index}"
-                );
+            for index in 0..segment_count(piece.len()) {
+                assert_group_proof_matches(&piece, &groups, index);
             }
+        }
+    }
+
+    #[test]
+    fn a_full_piece_proves_from_its_groups() {
+        // A 9 MiB piece of 144 groups. Proving every segment from the whole
+        // piece builds its whole tree 2304 times, so only the first and last
+        // groups' edges and one segment in between are checked.
+        let piece = piece(2304 * SEGMENT_BYTES);
+        let groups = group_hashes(&piece);
+        for index in [0, 15, 16, 1_000, 2_287, 2_288, 2_303] {
+            assert_group_proof_matches(&piece, &groups, index);
         }
     }
 
