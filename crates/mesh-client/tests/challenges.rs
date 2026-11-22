@@ -5,30 +5,19 @@ mod test_nodes;
 
 use std::time::Duration;
 
-use mesh_client::{Manifest, NodeClient, NodeRequestError, PlacedPiece, upload};
+use mesh_client::{Manifest, NodeClient, NodeRequestError, PlacedPiece};
 use mesh_node::NodeSettings;
 use reqwest::StatusCode;
-use test_nodes::{TestNode, node_list, piece_on, start_nodes};
+use test_nodes::{TestNode, node_list, piece_on, random_file, start_nodes, store_on};
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Three chunks' worth of bytes, so every piece has dozens of segments.
-fn sample_file() -> Vec<u8> {
-    (0..3_000_000u32)
-        .map(|position| (position % 251) as u8)
-        .collect()
-}
-
+/// About three chunks of bytes, so every piece has dozens of segments.
 async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let manifest = upload(
-        &NodeClient::new().unwrap(),
-        &node_list(&nodes),
-        sample_file().as_slice(),
-        LEASE,
-    )
-    .await
-    .unwrap();
+    let manifest = store_on(&node_list(&nodes), &random_file(3_000_000, 3), LEASE)
+        .await
+        .unwrap();
     (nodes, manifest)
 }
 
@@ -46,7 +35,7 @@ async fn segment_count_of(piece: &PlacedPiece) -> u32 {
 #[tokio::test]
 async fn an_honest_node_proves_it_holds_its_pieces() {
     let (_nodes, manifest) = stored_file().await;
-    let piece = &manifest.chunks[1].pieces[4];
+    let piece = &manifest.chunks[0].pieces[4];
     let last = segment_count_of(piece).await - 1;
 
     let proofs = NodeClient::new()

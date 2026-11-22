@@ -10,16 +10,21 @@
 //! ```
 //!
 //! `nodes.json` lists the nodes to choose from; `mesh_client::NodeList`
-//! describes it. The manifest holds the file's key: anyone with it can read
-//! the file.
+//! describes it. The manifest holds the chunk keys: anyone with it can read
+//! the file. `put` derives those keys from a dedup key kept in `mesh.key`,
+//! which it creates on first use; until there are accounts, that file is
+//! what makes the same chunk encrypt the same way every time.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use mesh_client::erasure::DATA_PIECES;
-use mesh_client::{AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth};
+use mesh_client::{
+    AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
+};
 
 #[derive(Parser)]
 struct Arguments {
@@ -31,18 +36,7 @@ struct Arguments {
 enum Command {
     /// Encrypts a file, spreads it over nodes from the list and writes its
     /// manifest.
-    Put {
-        file: PathBuf,
-        /// The JSON list of nodes to choose from.
-        #[arg(long)]
-        nodes: PathBuf,
-        /// Where to write the manifest. Keep it private: it holds the key.
-        #[arg(long)]
-        manifest: PathBuf,
-        /// How many days the nodes keep the file unless it is renewed.
-        #[arg(long, default_value_t = 30)]
-        days: u64,
-    },
+    Put(PutArguments),
     /// Makes the nodes keep a file for another number of days from now.
     Renew {
         manifest: PathBuf,
@@ -66,16 +60,32 @@ enum Command {
     Get { manifest: PathBuf, output: PathBuf },
 }
 
+#[derive(Args)]
+struct PutArguments {
+    file: PathBuf,
+    /// The JSON list of nodes to choose from.
+    #[arg(long)]
+    nodes: PathBuf,
+    /// Where to write the manifest. Keep it private: it holds the keys.
+    #[arg(long)]
+    manifest: PathBuf,
+    /// How many days the nodes keep the file unless it is renewed.
+    #[arg(long, default_value_t = 30)]
+    days: u64,
+    /// The file holding your dedup key; created if missing. Keep it private.
+    #[arg(long, default_value = "mesh.key")]
+    key_file: PathBuf,
+    /// A manifest whose chunks may be reused, such as an earlier version of
+    /// the same file; give as many as you like.
+    #[arg(long = "earlier")]
+    earlier_manifests: Vec<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let client = NodeClient::new()?;
     match Arguments::parse().command {
-        Command::Put {
-            file,
-            nodes,
-            manifest,
-            days,
-        } => put(&client, &file, &nodes, &manifest, days).await,
+        Command::Put(arguments) => put(&client, &arguments).await,
         Command::Renew { manifest, days } => renew(&client, &manifest, days).await,
         Command::Audit { manifest } => audit(&client, &manifest).await,
         Command::Repair {
@@ -87,26 +97,49 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn put(
-    client: &NodeClient,
-    file: &Path,
-    nodes_path: &Path,
-    manifest_path: &Path,
-    days: u64,
-) -> anyhow::Result<()> {
-    let list = NodeList::read(nodes_path)?;
-    let reader = tokio::fs::File::open(file)
+async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()> {
+    let list = NodeList::read(&arguments.nodes)?;
+    let dedup_key = load_or_create_dedup_key(&arguments.key_file)?;
+    let earlier = arguments
+        .earlier_manifests
+        .iter()
+        .map(|path| read_manifest(path))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let reader = tokio::fs::File::open(&arguments.file)
         .await
-        .with_context(|| format!("opening {}", file.display()))?;
-    let manifest = mesh_client::upload(client, &list, reader, days_to_duration(days)).await?;
-    write_manifest(manifest_path, &manifest)?;
+        .with_context(|| format!("opening {}", arguments.file.display()))?;
+    let lease = days_to_duration(arguments.days);
+    let manifest = mesh_client::upload(client, &list, &dedup_key, reader, lease, &earlier).await?;
+    write_manifest(&arguments.manifest, &manifest)?;
     println!(
-        "stored {} bytes in {} chunks for {days} days, manifest in {}",
+        "stored {} bytes in {} chunks for {} days, manifest in {}",
         manifest.size,
         manifest.chunks.len(),
-        manifest_path.display()
+        arguments.days,
+        arguments.manifest.display()
     );
     Ok(())
+}
+
+/// The dedup key in `path`, or a new one written there, readable by its
+/// owner only.
+fn load_or_create_dedup_key(path: &Path) -> anyhow::Result<DedupKey> {
+    if path.exists() {
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        return DedupKey::from_hex(&text).with_context(|| format!("parsing {}", path.display()));
+    }
+    let key = DedupKey::generate();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    writeln!(file, "{}", key.to_hex())?;
+    println!("created a new dedup key in {}", path.display());
+    Ok(key)
 }
 
 async fn renew(client: &NodeClient, manifest_path: &Path, days: u64) -> anyhow::Result<()> {

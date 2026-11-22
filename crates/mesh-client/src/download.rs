@@ -3,7 +3,7 @@
 use futures::future::join_all;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::encryption::{OpenError, open_chunk};
+use crate::encryption::open;
 use crate::erasure::{RebuildError, rebuild};
 use crate::manifest::{Manifest, PlacedPiece};
 use crate::node_client::NodeClient;
@@ -13,8 +13,8 @@ use crate::node_client::NodeClient;
 pub enum DownloadError {
     #[error("chunk {index}: {source}")]
     Rebuild { index: u32, source: RebuildError },
-    #[error(transparent)]
-    Open(#[from] OpenError),
+    #[error("chunk {index} does not decrypt with the key the manifest holds")]
+    Open { index: u32 },
     #[error("writing the file: {0}")]
     Write(#[from] std::io::Error),
     #[error("the file is {actual} bytes, the manifest says {expected}")]
@@ -42,7 +42,10 @@ pub async fn download(
         let pieces = fetch_pieces(client, &chunk.pieces).await;
         let sealed = rebuild(&pieces, chunk.sealed_len as usize)
             .map_err(|source| DownloadError::Rebuild { index, source })?;
-        let plaintext = open_chunk(&manifest.key, index, &sealed)?;
+        let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
+        // Opening proved the padded chunk is what was sealed; cutting it to
+        // the recorded length drops the padding.
+        plaintext.truncate(chunk.plain_len as usize);
         writer.write_all(&plaintext).await?;
         written += plaintext.len() as u64;
     }

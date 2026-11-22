@@ -18,22 +18,25 @@ it into erasure-coded pieces and spread those over independent nodes.
 
 ## Status
 
-Early. A file is spread over nodes chosen from a list, so that no operator,
-network or subnet holds more pieces of a chunk than it can lose, and it can be
-read back while any two of a chunk's nodes are down, have lost their pieces or
-return corrupted ones. Nodes keep each piece for a lease and delete it once
-the lease ends unless it is renewed, which is also how a file is deleted. An
-audit checks that the nodes still hold every piece, from a few random segments
-with Merkle proofs, and repair rebuilds lost pieces onto other nodes. There
-are no coordinators or tokens yet, so the node list is a file you write; the
-issues track what comes next.
+Early. A file is cut into chunks where its content says, each padded to a
+size bucket and encrypted under a key derived from its bytes, so a chunk you
+already stored is never stored again: an edited file only uploads the chunks
+that changed. The chunks are spread over nodes chosen from a list, so that no
+operator, network or subnet holds more pieces of a chunk than it can lose,
+and a file can be read back while any two of a chunk's nodes are down, have
+lost their pieces or return corrupted ones. Nodes keep each piece for a lease
+and delete it once the lease ends unless it is renewed, which is also how a
+file is deleted. An audit checks that the nodes still hold every piece, from
+a few random segments with Merkle proofs, and repair rebuilds lost pieces
+onto other nodes. There are no coordinators or tokens yet, so the node list
+is a file you write; the issues track what comes next.
 
 ## Layout
 
 - `crates/mesh-core`: types every role shares, such as piece ids.
 - `crates/mesh-node`: the node, and the `mesh-node` binary.
-- `crates/mesh-client`: encryption, erasure coding, upload and download, and
-  the `mesh` binary.
+- `crates/mesh-client`: chunking, encryption, erasure coding, placement,
+  upload, download, audits and repair, and the `mesh` binary.
 
 ## Try it
 
@@ -68,7 +71,18 @@ kill %2 %5
 target/release/mesh get photo.manifest.json photo-again.jpg
 ```
 
-The manifest holds the file's key, so anyone who has it can read the file.
+The manifest holds the chunk keys, so anyone who has it can read the file.
+The first `put` also creates `mesh.key`, your dedup key: keep it private, and
+keep using it, since it is what makes your chunks encrypt the same way every
+time.
+
+When you store a new version of a file, name the old manifest, and only the
+chunks that changed are uploaded:
+
+```sh
+target/release/mesh put photo-edited.jpg --nodes nodes.json \
+  --manifest photo-edited.manifest.json --earlier photo.manifest.json
+```
 
 `put` stores a file for 30 days by default (`--days` changes it). To keep it
 longer, renew it before then:

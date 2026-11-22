@@ -6,32 +6,28 @@
 
 mod test_nodes;
 
-use std::time::Duration;
-
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
+use mesh_client::chunking::{AVERAGE_CHUNK_BYTES, MAX_CHUNK_BYTES, MIN_CHUNK_BYTES};
 use mesh_client::erasure::RebuildError;
-use mesh_client::{CHUNK_BYTES, DownloadError, Manifest, NodeClient, UploadError, upload};
+use mesh_client::{DedupKey, DownloadError, Manifest, NodeClient, UploadError, upload};
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, download_bytes, node_list, start_nodes};
+use test_nodes::{TestNode, download_bytes, node_list, random_file, start_nodes, store_on};
 use tokio::io::{AsyncRead, ReadBuf};
 
 /// Long enough that no piece expires while a test runs.
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Two and a half chunks of bytes that differ from position to position, so a
-/// misplaced piece would show.
+/// About three chunks of bytes.
 fn sample_file() -> Vec<u8> {
-    let length = CHUNK_BYTES * 5 / 2 + 123;
-    (0..length)
-        .map(|position| (position * 31 % 251) as u8)
-        .collect()
+    random_file(AVERAGE_CHUNK_BYTES * 3, 1)
 }
 
 async fn store(nodes: &[TestNode], file: &[u8]) -> Result<Manifest, UploadError> {
-    upload(&NodeClient::new().unwrap(), &node_list(nodes), file, LEASE).await
+    store_on(&node_list(nodes), file, LEASE).await
 }
 
 /// Reads with a new client, so no connection opened during the upload is reused.
@@ -72,14 +68,26 @@ async fn a_file_comes_back_unchanged() {
 
     let manifest = store(&nodes, &file).await.unwrap();
 
-    assert_eq!(manifest.chunks.len(), 3);
+    assert!(manifest.chunks.len() > 1);
+    let lengths: Vec<usize> = manifest
+        .chunks
+        .iter()
+        .map(|chunk| chunk.plain_len as usize)
+        .collect();
+    assert_eq!(lengths.iter().sum::<usize>(), file.len());
+    let (last, rest) = lengths.split_last().unwrap();
+    assert!(
+        rest.iter()
+            .all(|&length| (MIN_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(&length))
+    );
+    assert!(*last <= MAX_CHUNK_BYTES);
     assert_eq!(read_back(&manifest).await.unwrap(), file);
 }
 
 #[tokio::test]
 async fn nodes_only_ever_hold_noise() {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let file = vec![b'A'; CHUNK_BYTES];
+    let file = vec![b'A'; AVERAGE_CHUNK_BYTES];
 
     store(&nodes, &file).await.unwrap();
 
@@ -148,27 +156,34 @@ async fn an_empty_file_comes_back_empty() {
 }
 
 #[tokio::test]
-async fn a_file_read_in_small_pieces_is_still_cut_into_whole_chunks() {
+async fn a_file_read_in_small_pieces_is_cut_like_one_read_at_once() {
     let nodes = start_nodes(NodeSettings::default()).await;
     let file = sample_file();
+    let dedup_key = DedupKey::generate();
+    let client = NodeClient::new().unwrap();
+    let list = node_list(&nodes);
     let reader = TrickleReader {
         data: file.clone(),
         position: 0,
         fail_at_end: false,
     };
 
-    let manifest = upload(
-        &NodeClient::new().unwrap(),
-        &node_list(&nodes),
-        reader,
-        LEASE,
-    )
-    .await
-    .unwrap();
+    let trickled = upload(&client, &list, &dedup_key, reader, LEASE, &[])
+        .await
+        .unwrap();
+    let at_once = upload(&client, &list, &dedup_key, file.as_slice(), LEASE, &[])
+        .await
+        .unwrap();
 
-    assert_eq!(manifest.chunks.len(), 3);
-    assert_eq!(manifest.size, file.len() as u64);
-    assert_eq!(read_back(&manifest).await.unwrap(), file);
+    let lengths = |manifest: &Manifest| -> Vec<u32> {
+        manifest
+            .chunks
+            .iter()
+            .map(|chunk| chunk.plain_len)
+            .collect()
+    };
+    assert_eq!(lengths(&trickled), lengths(&at_once));
+    assert_eq!(read_back(&trickled).await.unwrap(), file);
 }
 
 #[tokio::test]
@@ -183,8 +198,10 @@ async fn a_failing_reader_fails_the_upload() {
     let result = upload(
         &NodeClient::new().unwrap(),
         &node_list(&nodes),
+        &DedupKey::generate(),
         reader,
         LEASE,
+        &[],
     )
     .await;
 

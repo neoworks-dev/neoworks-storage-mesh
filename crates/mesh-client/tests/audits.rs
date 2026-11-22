@@ -6,30 +6,20 @@ mod test_nodes;
 
 use std::time::{Duration, Instant};
 
-use mesh_client::{AUDIT_DEADLINE, AuditReport, Manifest, NodeClient, PieceHealth, audit, upload};
+use mesh_client::erasure::TOTAL_PIECES;
+use mesh_client::{AUDIT_DEADLINE, AuditReport, Manifest, NodeClient, PieceHealth, audit};
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, node_list, position_on, start_nodes};
+use test_nodes::{TestNode, node_list, position_on, random_file, start_nodes, store_on};
 use tokio::net::TcpListener;
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Three chunks' worth of bytes.
-fn sample_file() -> Vec<u8> {
-    (0..3_000_000u32)
-        .map(|position| (position % 251) as u8)
-        .collect()
-}
-
+/// About three chunks of bytes on six nodes.
 async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let manifest = upload(
-        &NodeClient::new().unwrap(),
-        &node_list(&nodes),
-        sample_file().as_slice(),
-        LEASE,
-    )
-    .await
-    .unwrap();
+    let manifest = store_on(&node_list(&nodes), &random_file(3_000_000, 4), LEASE)
+        .await
+        .unwrap();
     (nodes, manifest)
 }
 
@@ -49,13 +39,19 @@ async fn a_well_kept_file_is_healthy_everywhere() {
 
     let report = audit(&NodeClient::new().unwrap(), &manifest, AUDIT_DEADLINE).await;
 
-    assert_eq!(report.chunks.len(), 3);
-    assert!(report.chunks.iter().all(|chunk| chunk.healthy() == 6));
+    assert_eq!(report.chunks.len(), manifest.chunks.len());
+    assert!(
+        report
+            .chunks
+            .iter()
+            .all(|chunk| chunk.healthy() == TOTAL_PIECES)
+    );
 }
 
 #[tokio::test]
 async fn each_kind_of_failure_is_told_apart() {
     let (nodes, manifest) = stored_file().await;
+    let chunks = manifest.chunks.len();
 
     nodes[0].stop();
     nodes[1].lose_all_pieces();
@@ -63,11 +59,11 @@ async fn each_kind_of_failure_is_told_apart() {
     let report = audit(&NodeClient::new().unwrap(), &manifest, AUDIT_DEADLINE).await;
 
     let health = |node: &TestNode| health_on(&report, &manifest, &node.url);
-    assert_eq!(health(&nodes[0]), vec![PieceHealth::Unreachable; 3]);
-    assert_eq!(health(&nodes[1]), vec![PieceHealth::Missing; 3]);
-    assert_eq!(health(&nodes[2]), vec![PieceHealth::Failed; 3]);
+    assert_eq!(health(&nodes[0]), vec![PieceHealth::Unreachable; chunks]);
+    assert_eq!(health(&nodes[1]), vec![PieceHealth::Missing; chunks]);
+    assert_eq!(health(&nodes[2]), vec![PieceHealth::Failed; chunks]);
     for node in &nodes[3..] {
-        assert_eq!(health(node), vec![PieceHealth::Healthy; 3]);
+        assert_eq!(health(node), vec![PieceHealth::Healthy; chunks]);
     }
     assert!(report.chunks.iter().all(|chunk| chunk.healthy() == 3));
 }
@@ -75,6 +71,7 @@ async fn each_kind_of_failure_is_told_apart() {
 #[tokio::test]
 async fn a_node_that_never_answers_is_cut_off_at_the_deadline() {
     let (_nodes, mut manifest) = stored_file().await;
+    let chunks = manifest.chunks.len();
     // A node that accepts connections and then says nothing, like one busy
     // fetching the piece from somewhere else.
     let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -89,18 +86,16 @@ async fn a_node_that_never_answers_is_cut_off_at_the_deadline() {
         chunk.pieces[5].node = silent_url.clone();
     }
 
+    let deadline = Duration::from_millis(300);
     let started = Instant::now();
-    let report = audit(
-        &NodeClient::new().unwrap(),
-        &manifest,
-        Duration::from_millis(300),
-    )
-    .await;
+    let report = audit(&NodeClient::new().unwrap(), &manifest, deadline).await;
 
     assert_eq!(
         health_on(&report, &manifest, &silent_url),
-        vec![PieceHealth::Unreachable; 3]
+        vec![PieceHealth::Unreachable; chunks]
     );
-    // Three chunks audited one after the other, each waiting once.
-    assert!(started.elapsed() < Duration::from_secs(3));
+    // Chunks are audited one after the other, each waiting for the deadline
+    // once; anything near the 30 second request timeout would be a failure.
+    let allowance = deadline * chunks as u32 + Duration::from_secs(2);
+    assert!(started.elapsed() < allowance);
 }

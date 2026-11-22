@@ -7,31 +7,26 @@ mod test_nodes;
 use std::time::Duration;
 
 use mesh_client::{
-    AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth, audit, repair, upload,
+    AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth, audit, repair,
 };
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, download_bytes, node_list, position_on, start_nodes};
+use test_nodes::{
+    TestNode, download_bytes, node_list, position_on, random_file, start_nodes, store_on,
+};
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Three chunks' worth of bytes.
+/// About three chunks of bytes.
 fn sample_file() -> Vec<u8> {
-    (0..3_000_000u32)
-        .map(|position| (position % 251) as u8)
-        .collect()
+    random_file(3_000_000, 5)
 }
 
 /// A file on six nodes, every chunk with one piece on each.
 async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let manifest = upload(
-        &NodeClient::new().unwrap(),
-        &node_list(&nodes),
-        sample_file().as_slice(),
-        LEASE,
-    )
-    .await
-    .unwrap();
+    let manifest = store_on(&node_list(&nodes), &sample_file(), LEASE)
+        .await
+        .unwrap();
     (nodes, manifest)
 }
 
@@ -62,7 +57,7 @@ async fn an_intact_file_is_left_alone() {
 
     let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
 
-    assert_eq!(outcome, vec![ChunkRepair::Intact; 3]);
+    assert_eq!(outcome, vec![ChunkRepair::Intact; manifest.chunks.len()]);
     assert!(spares[0].piece_files().is_empty());
 }
 
@@ -85,7 +80,10 @@ async fn lost_pieces_are_rebuilt_on_spare_nodes() {
     nodes[4].lose_all_pieces();
     let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
 
-    assert_eq!(outcome, vec![ChunkRepair::Repaired { replaced: 2 }; 3]);
+    assert_eq!(
+        outcome,
+        vec![ChunkRepair::Repaired { replaced: 2 }; manifest.chunks.len()]
+    );
     // Every other node already holds a piece of each chunk, so the two lost
     // pieces can only have gone to the two spares, one each.
     for (chunk, [first, second]) in manifest.chunks.iter().zip(lost_positions) {
@@ -126,7 +124,10 @@ async fn one_loss_is_enough_to_repair() {
     nodes[3].corrupt_all_pieces();
     let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
 
-    assert_eq!(outcome, vec![ChunkRepair::Repaired { replaced: 1 }; 3]);
+    assert_eq!(
+        outcome,
+        vec![ChunkRepair::Repaired { replaced: 1 }; manifest.chunks.len()]
+    );
 }
 
 #[tokio::test]
@@ -143,7 +144,10 @@ async fn a_spare_node_that_is_down_is_passed_over() {
     nodes[2].lose_all_pieces();
     let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
 
-    assert_eq!(outcome, vec![ChunkRepair::Repaired { replaced: 1 }; 3]);
+    assert_eq!(
+        outcome,
+        vec![ChunkRepair::Repaired { replaced: 1 }; manifest.chunks.len()]
+    );
     for (chunk, position) in manifest.chunks.iter().zip(lost_positions) {
         assert_eq!(chunk.pieces[position].node, spares[1].url);
     }
@@ -162,7 +166,7 @@ async fn too_few_spare_nodes_leave_pieces_unplaced() {
         replaced: 1,
         unplaced: 1,
     };
-    assert_eq!(outcome, vec![partly; 3]);
+    assert_eq!(outcome, vec![partly; manifest.chunks.len()]);
 }
 
 #[tokio::test]
@@ -180,7 +184,10 @@ async fn a_chunk_with_three_losses_is_reported_lost() {
     nodes[2].stop();
     let outcome = audit_and_repair(&mut manifest, &all_nodes(&nodes, &spares)).await;
 
-    assert_eq!(outcome, vec![ChunkRepair::Lost { fetched: 3 }; 3]);
+    assert_eq!(
+        outcome,
+        vec![ChunkRepair::Lost { fetched: 3 }; manifest.chunks.len()]
+    );
     let nodes_after: Vec<String> = manifest.chunks[0]
         .pieces
         .iter()

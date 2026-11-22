@@ -5,10 +5,12 @@
 #![allow(dead_code)]
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use mesh_client::erasure::TOTAL_PIECES;
 use mesh_client::{
-    ChunkRecord, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece, download,
+    ChunkRecord, DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece,
+    UploadError, download, upload,
 };
 use mesh_node::{NodeSettings, PieceStore};
 use tempfile::TempDir;
@@ -72,6 +74,32 @@ pub async fn start_nodes(settings: NodeSettings) -> Vec<TestNode> {
 
 pub fn urls(nodes: &[TestNode]) -> Vec<String> {
     nodes.iter().map(|node| node.url.clone()).collect()
+}
+
+/// `length` bytes that look random but are the same for the same `seed`, so
+/// chunk boundaries fall where they would in a real file and tests repeat.
+pub fn random_file(length: usize, seed: u64) -> Vec<u8> {
+    // xorshift64*: small, fast and plenty random for chunking.
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..length)
+        .map(|_| {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8
+        })
+        .collect()
+}
+
+/// Stores `file` on nodes from `list` with a fresh dedup key and nothing
+/// earlier to reuse.
+pub async fn store_on(
+    list: &NodeList,
+    file: &[u8],
+    lease: Duration,
+) -> Result<Manifest, UploadError> {
+    let client = NodeClient::new().unwrap();
+    upload(&client, list, &DedupKey::generate(), file, lease, &[]).await
 }
 
 /// Downloads the file `manifest` describes into memory.
