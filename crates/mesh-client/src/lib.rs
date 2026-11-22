@@ -33,11 +33,13 @@
 //! one collection can be shared without the rest.
 //!
 //! People leave each other small sealed messages in [`mailboxes`] on nodes,
-//! found by a hash of the recipient's key and the week.
+//! found by a hash of the recipient's key and the week. A device that saves
+//! tells the account's other devices that way ([`change_notices`]).
 
 pub mod account;
 mod audit;
 pub mod batch_renew;
+pub mod change_notices;
 pub mod chunk_registration;
 pub mod chunking;
 pub mod collection;
