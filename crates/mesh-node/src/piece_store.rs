@@ -3,8 +3,9 @@
 //! A node's data directory looks like this:
 //!
 //! ```text
-//! <data>/pieces/<64 hex digits>   one file per piece, named by its id
-//! <data>/leases.sqlite3           when each piece's lease ends
+//! <data>/pieces/<64 hex digits>             one file per piece, named by its id
+//! <data>/pieces/<64 hex digits>.<n>.partial an upload still being written
+//! <data>/leases.sqlite3                     when each piece's lease ends
 //! ```
 //!
 //! The lease table decides what the node holds: a piece whose lease has ended
@@ -44,11 +45,13 @@ pub enum StoreError {
 }
 
 impl PieceStore {
-    /// Opens the store in `directory`, creating what is missing.
+    /// Opens the store in `directory`, creating what is missing and deleting
+    /// uploads that a previous run left unfinished.
     pub async fn open(directory: impl AsRef<Path>) -> Result<Self, StoreError> {
         let directory = directory.as_ref();
         let pieces_directory = directory.join("pieces");
         tokio::fs::create_dir_all(&pieces_directory).await?;
+        remove_partial_uploads(&pieces_directory).await?;
         let leases = LeaseTable::open(&directory.join("leases.sqlite3"))?;
         Ok(PieceStore {
             pieces_directory,
@@ -170,6 +173,23 @@ impl PieceStore {
     }
 }
 
+/// Deletes the temporary files of uploads cut off when the node stopped.
+///
+/// Only `PieceStore::open` calls this, before the store takes any upload, so
+/// every `.partial` file it finds belongs to a run that has ended. No lease
+/// points at these files, so without this they would fill the disk for good.
+async fn remove_partial_uploads(pieces_directory: &Path) -> io::Result<()> {
+    let mut entries = tokio::fs::read_dir(pieces_directory).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        let is_partial = path.extension().is_some_and(|end| end == "partial");
+        if is_partial {
+            tokio::fs::remove_file(path).await?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +276,22 @@ mod tests {
             store.get(&PieceId::of(&long), 150).await.unwrap(),
             Some(long)
         );
+    }
+
+    #[tokio::test]
+    async fn opening_deletes_unfinished_uploads_and_keeps_pieces() {
+        let (directory, store) = store().await;
+        let bytes = b"piece".to_vec();
+        let id = PieceId::of(&bytes);
+        store.put(&id, &bytes, 1_000).await.unwrap();
+        drop(store);
+        let pieces_directory = directory.path().join("pieces");
+        let partial_path = pieces_directory.join(format!("{id}.0.partial"));
+        std::fs::write(&partial_path, b"half a pie").unwrap();
+
+        let store = PieceStore::open(directory.path()).await.unwrap();
+
+        assert!(!partial_path.exists());
+        assert_eq!(store.get(&id, 0).await.unwrap(), Some(bytes));
     }
 }
