@@ -76,6 +76,10 @@ pub struct ListedNode {
     /// The median of the node's recent speed tests, in bits per second, or
     /// `None` before its first one.
     pub bandwidth_bits_per_second: Option<u64>,
+    /// The bytes the node said it holds when last asked, or `None` when it
+    /// never said. Only the node knows this, so it is a claim; prices
+    /// ([`crate::prices`]) count it no higher than the node's capacity.
+    pub used_bytes: Option<u64>,
 }
 
 /// Every node a coordinator knows, at one moment.
@@ -223,6 +227,7 @@ mod tests {
                 record: Signed::sign(&key(1), record(&key(1))),
                 uptime_permille: 990,
                 bandwidth_bits_per_second: None,
+                used_bytes: None,
             }],
             daily_loss_per_million: None,
         };

@@ -1,5 +1,5 @@
 //! The coordinator's HTTP interface: nodes register, clients fetch the node
-//! list, and people sign up and sign in ([`sign_in_routes`]).
+//! list and the prices, and people sign up and sign in ([`sign_in_routes`]).
 
 use std::sync::Arc;
 
@@ -9,11 +9,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mesh_core::node_list::NodeRecord;
+use mesh_core::prices::PRICES_ROUTE;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
 use mesh_core::signed::{Signed, SigningKey};
 
 use crate::accounts::Accounts;
 use crate::clock::unix_now;
+use crate::price_book::LatestPrices;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
 use crate::registry::{Registered, Registry};
@@ -30,6 +32,7 @@ pub struct Coordinator {
     /// The coordinator's key, which signs token keys.
     pub key: SigningKey,
     pub latest: Arc<LatestSnapshot>,
+    pub prices: Arc<LatestPrices>,
     pub http: reqwest::Client,
     /// How far a record's signing time may be from now, in seconds.
     pub max_record_age_seconds: u64,
@@ -42,6 +45,7 @@ pub fn router(coordinator: Coordinator) -> Router {
     Router::new()
         .route(REGISTER_ROUTE, post(register))
         .route(NODE_LIST_ROUTE, get(node_list))
+        .route(PRICES_ROUTE, get(prices))
         .merge(sign_in_routes::routes())
         .merge(token_routes::routes())
         .with_state(coordinator)
@@ -117,6 +121,15 @@ async fn node_list(State(coordinator): State<Coordinator>) -> Response {
             "no node list published yet",
         )
             .into_response(),
+    }
+}
+
+/// `GET /prices`: today's signed price table.
+async fn prices(State(coordinator): State<Coordinator>) -> Response {
+    let prices = coordinator.prices.read().await;
+    match prices.as_ref() {
+        Some(table) => Json(table.clone()).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, "no prices published yet").into_response(),
     }
 }
 

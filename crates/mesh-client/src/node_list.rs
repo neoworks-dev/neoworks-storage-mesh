@@ -149,6 +149,7 @@ mod tests {
             record: Signed::sign(signer, body),
             uptime_permille,
             bandwidth_bits_per_second: None,
+            used_bytes: None,
         }
     }
 

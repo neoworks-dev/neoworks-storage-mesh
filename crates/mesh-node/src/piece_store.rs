@@ -151,6 +151,23 @@ impl PieceStore {
         Ok(ended.len())
     }
 
+    /// The bytes all piece files take together, counted from the directory.
+    /// Uploads in progress are left out. Pieces whose lease ended but which
+    /// the sweep has not deleted yet count, since they still take space.
+    pub async fn stored_bytes(&self) -> io::Result<u64> {
+        let mut entries = tokio::fs::read_dir(&self.pieces_directory).await?;
+        let mut total = 0;
+        while let Some(entry) = entries.next_entry().await? {
+            // Finished pieces are named by their id alone; temporary files
+            // of uploads carry a number and `.partial` after a dot.
+            if entry.file_name().to_string_lossy().contains('.') {
+                continue;
+            }
+            total += entry.metadata().await?.len();
+        }
+        Ok(total)
+    }
+
     /// Writes `bytes` to `path` through a temporary file, so a reader sees
     /// either no piece or the whole piece, never half of one, even if the node
     /// stops mid-write.

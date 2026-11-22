@@ -29,10 +29,12 @@
 //! - `GET /pointers/{owner}` returns the newest [`Pointer`] the node holds,
 //!   or `404 Not Found`.
 //!
-//! And two about itself:
+//! And three about itself:
 //!
 //! - `GET /identity` returns the node's [`NodeIdentity`]: its id and the
 //!   public key the id is the hash of.
+//! - `GET /usage` returns a [`NodeUsage`]: how many bytes its pieces take,
+//!   which coordinators use to work out prices.
 //! - `GET /speed-test` returns [`SPEED_TEST_BYTES`] bytes that do not
 //!   compress, for coordinators to time, or `429 Too Many Requests` when the
 //!   node has served its share of speed tests for now.
@@ -151,6 +153,16 @@ pub const SPEED_TEST_ROUTE: &str = "/speed-test";
 /// barely counts; served once an hour, it costs a node about 6 GB of upload
 /// a month.
 pub const SPEED_TEST_BYTES: usize = 8_000_000;
+
+/// The route a node says how much it stores at.
+pub const USAGE_ROUTE: &str = "/usage";
+
+/// How much a node stores, as it says itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeUsage {
+    /// The bytes its piece files take.
+    pub used_bytes: u64,
+}
 
 /// Who a node is: its id and the public key the id is the hash of.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

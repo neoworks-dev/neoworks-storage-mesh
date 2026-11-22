@@ -1,5 +1,5 @@
 //! Checking that nodes are up, which is where their uptime and the loss rate
-//! come from.
+//! come from, and asking them how much they store.
 //!
 //! The coordinator asks each node for its identity. A node counts as up when
 //! it answers with the id it registered: a different server now listening at
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 use mesh_core::NodeId;
-use mesh_core::protocol::{IDENTITY_ROUTE, NodeIdentity};
+use mesh_core::protocol::{IDENTITY_ROUTE, NodeIdentity, NodeUsage, USAGE_ROUTE};
 
 use crate::clock::unix_now;
 use crate::measurements::Measurements;
@@ -31,8 +31,18 @@ pub async fn answers_as(http: &reqwest::Client, url: &str, node_id: &NodeId) -> 
     identity.is_consistent() && identity.node_id == *node_id
 }
 
+/// What the node at `url` says it stores, or `None` when it doesn't say.
+pub async fn reported_usage(http: &reqwest::Client, url: &str) -> Option<u64> {
+    let usage_url = format!("{}{USAGE_ROUTE}", url.trim_end_matches('/'));
+    let response = http.get(usage_url).send().await.ok()?;
+    let body = response.bytes().await.ok()?;
+    let usage: NodeUsage = serde_json::from_slice(&body).ok()?;
+    Some(usage.used_bytes)
+}
+
 /// Checks every registered node once, all at the same time, and notes the
-/// results: every check for uptime, and every answer for the node's life.
+/// results: every check for uptime, every answer for the node's life, and
+/// what each node that answered says it stores.
 pub async fn probe_all(
     http: &reqwest::Client,
     registry: &Registry,
@@ -40,14 +50,27 @@ pub async fn probe_all(
 ) -> rusqlite::Result<()> {
     let records = registry.records().await?;
     let checks = records.iter().map(|record| async move {
-        let answered = answers_as(http, &record.body.url, &record.body.node_id).await;
-        (record.body.node_id, answered)
+        let url = &record.body.url;
+        let answered = answers_as(http, url, &record.body.node_id).await;
+        // Only asked of a node that just proved who it is, so a server that
+        // took over its address can't speak for it.
+        let usage = if answered {
+            reported_usage(http, url).await
+        } else {
+            None
+        };
+        (record.body.node_id, answered, usage)
     });
     let probed_at = unix_now();
-    for (node_id, answered) in join_all(checks).await {
+    for (node_id, answered, usage) in join_all(checks).await {
         registry.record_probe(&node_id, probed_at, answered).await?;
         if answered {
             measurements.record_answer(&node_id, probed_at).await?;
+        }
+        if let Some(used_bytes) = usage {
+            measurements
+                .record_usage(&node_id, used_bytes, probed_at)
+                .await?;
         }
     }
     Ok(())

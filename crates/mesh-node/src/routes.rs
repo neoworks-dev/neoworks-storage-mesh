@@ -1,7 +1,8 @@
 //! The node's HTTP interface: storing, renewing, fetching pieces and proving
 //! the node still holds them, and storing and fetching signed pointers.
 //! Paying for storage with tabs is in [`tab_routes`](crate::tab_routes), and
-//! speed tests are in [`speed_test`](crate::speed_test).
+//! speed tests and usage are in [`speed_test`](crate::speed_test) and
+//! [`usage`](crate::usage).
 //!
 //! `mesh_core::protocol` describes the requests; this module checks them and
 //! maps them onto the [`PieceStore`] and the [`PointerStore`].
@@ -31,6 +32,7 @@ use crate::settings::NodeSettings;
 use crate::speed_test::{self, SpeedTests};
 use crate::tab_book::TabBook;
 use crate::tab_routes;
+use crate::usage::{self, UsageCount};
 
 /// What every request handler needs.
 #[derive(Clone)]
@@ -45,6 +47,7 @@ pub(crate) struct Node {
     /// For spending tokens at the coordinator.
     pub(crate) http: reqwest::Client,
     pub(crate) speed_tests: Arc<SpeedTests>,
+    pub(crate) usage: Arc<UsageCount>,
 }
 
 /// The router of the node `identity`, serving `store`, `pointers` and
@@ -69,6 +72,7 @@ pub fn router(
         token_coordinator: settings.require_tokens.clone(),
         http: reqwest::Client::new(),
         speed_tests: Arc::new(SpeedTests::new()),
+        usage: Arc::new(UsageCount::default()),
     };
     Router::new()
         .route(PIECE_ROUTE, put(put_piece).get(get_piece))
@@ -79,6 +83,7 @@ pub fn router(
         .route(IDENTITY_ROUTE, get(get_identity))
         .merge(tab_routes::routes())
         .merge(speed_test::routes())
+        .merge(usage::routes())
         .layer(DefaultBodyLimit::max(MAX_PIECE_BYTES))
         .with_state(node)
 }

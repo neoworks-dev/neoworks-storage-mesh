@@ -23,6 +23,7 @@ mod speed_test;
 mod sweep;
 pub mod tab_book;
 mod tab_routes;
+mod usage;
 
 pub use node_data::{NodeData, OpenError};
 pub use node_key::NodeKeyError;

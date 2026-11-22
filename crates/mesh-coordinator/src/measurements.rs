@@ -1,7 +1,8 @@
 //! What a coordinator measures about nodes beyond whether they answer: how
-//! fast they upload and how often they disappear for good, in SQLite.
+//! fast they upload, how often they disappear for good and how much they
+//! store, in SQLite.
 //!
-//! `<data>/measurements.sqlite3` holds three tables:
+//! `<data>/measurements.sqlite3` holds four tables:
 //!
 //! - `speed_test`: one row per timed speed test. A node's bandwidth is the
 //!   median of its recent ones, since one test can hit a busy moment.
@@ -11,6 +12,9 @@
 //!   coordinator's `lost_after` is lost: its life moves here, and if it ever
 //!   answers again it starts a new one, so the time it was gone is not
 //!   counted as time it was watched.
+//! - `node_usage`: how many bytes each node last said it stores. Only the
+//!   node knows, so this is a claim; prices count it no higher than the
+//!   capacity the node offers.
 //!
 //! The loss rate is losses per day of watching one node, which is what
 //! choosing a layout needs: the chance that a node holding a piece is gone
@@ -19,7 +23,7 @@
 use std::path::Path;
 
 use mesh_core::NodeId;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 const DAY_SECONDS: u64 = 24 * 60 * 60;
@@ -57,6 +61,11 @@ impl Measurements {
                  first_answered  INTEGER NOT NULL,
                  last_answered   INTEGER NOT NULL,
                  lost_at         INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS node_usage (
+                 node_id      TEXT PRIMARY KEY,
+                 used_bytes   INTEGER NOT NULL,
+                 reported_at  INTEGER NOT NULL
              );",
         )?;
         Ok(Measurements {
@@ -101,6 +110,38 @@ impl Measurements {
             params![until],
         )?;
         Ok(())
+    }
+
+    /// Notes that `node_id` said at `reported_at` that it stores
+    /// `used_bytes`, replacing what it said before.
+    pub async fn record_usage(
+        &self,
+        node_id: &NodeId,
+        used_bytes: u64,
+        reported_at: u64,
+    ) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().await;
+        // SQLite integers are signed; no node stores 9 exabytes, so a larger
+        // claim is cut there rather than refused.
+        let used_bytes = used_bytes.min(i64::MAX as u64);
+        connection.execute(
+            "INSERT OR REPLACE INTO node_usage (node_id, used_bytes, reported_at)
+             VALUES (?1, ?2, ?3)",
+            params![node_id.to_string(), used_bytes, reported_at],
+        )?;
+        Ok(())
+    }
+
+    /// What `node_id` last said it stores, if it said so after `since`.
+    pub async fn usage(&self, node_id: &NodeId, since: u64) -> rusqlite::Result<Option<u64>> {
+        let connection = self.connection.lock().await;
+        connection
+            .query_row(
+                "SELECT used_bytes FROM node_usage WHERE node_id = ?1 AND reported_at > ?2",
+                params![node_id.to_string(), since],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     /// Notes that `node_id` answered at `answered_at`, starting a new life
@@ -247,6 +288,25 @@ mod tests {
             measurements.bandwidth(&fast, 0).await.unwrap(),
             Some(60_000_000)
         );
+    }
+
+    #[tokio::test]
+    async fn usage_is_the_newest_report_while_it_is_recent() {
+        let (_directory, measurements) = measurements();
+        measurements.record_usage(&node(1), 500, 10).await.unwrap();
+        measurements.record_usage(&node(1), 700, 20).await.unwrap();
+        measurements
+            .record_usage(&node(2), u64::MAX, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(measurements.usage(&node(1), 0).await.unwrap(), Some(700));
+        assert_eq!(measurements.usage(&node(1), 20).await.unwrap(), None);
+        assert_eq!(
+            measurements.usage(&node(2), 0).await.unwrap(),
+            Some(i64::MAX as u64)
+        );
+        assert_eq!(measurements.usage(&node(3), 0).await.unwrap(), None);
     }
 
     #[tokio::test]

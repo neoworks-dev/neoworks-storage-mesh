@@ -1,17 +1,19 @@
 //! Nodes registering with a coordinator over HTTP, and the snapshot it
 //! publishes.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::node_list::{CoordinatorList, NodeSnapshot};
+use mesh_core::prices::{DAY_SECONDS, PriceTable};
 use mesh_core::signed::{Signed, SigningKey};
 use mesh_node::{NodeData, NodeSettings, Registration, RegistrationError, register};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 
-/// A coordinator that publishes every 100 ms, so tests need not wait.
+/// A coordinator that publishes, probes and measures every 100 ms, so tests
+/// need not wait.
 async fn start_coordinator() -> (TempDir, String, CoordinatorList) {
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
@@ -22,6 +24,7 @@ async fn start_coordinator() -> (TempDir, String, CoordinatorList) {
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_millis(100),
         speed_test_interval: Duration::from_millis(100),
+        probe_interval: Duration::from_millis(100),
         ..CoordinatorSettings::default()
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -118,6 +121,41 @@ async fn a_registered_node_is_in_the_signed_snapshot() {
     assert_eq!(listed.record.verify_node(), Ok(()));
     assert_eq!(listed.record.body.url, node_url);
     assert_eq!(listed.uptime_permille, 1000);
+}
+
+#[tokio::test]
+async fn todays_prices_are_signed_and_a_nodes_usage_is_listed() {
+    let (_coordinator_data, coordinator, coordinators) = start_coordinator().await;
+    let (_node_data, node_url, node_key) = start_node().await;
+    let http = reqwest::Client::new();
+    register(&http, &node_key, &registration(&coordinator, &node_url))
+        .await
+        .unwrap();
+
+    let snapshot = snapshot_where(&coordinator, |snapshot| {
+        snapshot.nodes.iter().any(|node| node.used_bytes.is_some())
+    })
+    .await;
+    assert_eq!(snapshot.body.nodes[0].used_bytes, Some(0));
+
+    let table: Signed<PriceTable> = loop {
+        let response = http
+            .get(format!("{coordinator}/prices"))
+            .send()
+            .await
+            .unwrap();
+        if response.status() == StatusCode::OK {
+            break serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(coordinators.check_signed(&table), Ok(()));
+    let today = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / DAY_SECONDS;
+    assert_eq!(table.body, PriceTable::starting(today));
 }
 
 #[tokio::test]

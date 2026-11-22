@@ -1,8 +1,8 @@
 //! Signing and publishing snapshots of the node list.
 //!
 //! A snapshot holds every node that answered at least one check in the
-//! uptime window, with its record, its uptime and its bandwidth, and the
-//! loss rate over all nodes. Nodes that stopped answering drop out of the
+//! uptime window, with its record, its uptime, its bandwidth and what it
+//! says it stores, and the loss rate over all nodes. Nodes that stopped answering drop out of the
 //! next snapshot; their records stay in the registry, so they come back once
 //! they answer again.
 
@@ -43,6 +43,7 @@ pub async fn snapshot(
             record,
             uptime_permille,
             bandwidth_bits_per_second: measurements.bandwidth(&node_id, bandwidth_since).await?,
+            used_bytes: measurements.usage(&node_id, uptime_since).await?,
         });
     }
     let loss_since = now.saturating_sub(settings.loss_window.as_secs());

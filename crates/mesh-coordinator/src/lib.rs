@@ -4,7 +4,9 @@
 //! that each node answers at the address it claims, keeps checking that it is
 //! up, times how fast it uploads and counts how often nodes disappear for
 //! good. Every hour it publishes a signed snapshot of all nodes with their
-//! uptime and bandwidth, and the loss rate. Clients download the snapshot whole and check its signature
+//! uptime and bandwidth, and the loss rate; once a day it works out what
+//! storage costs on each class of nodes from that snapshot and signs the
+//! prices too. Clients download the snapshot whole and check its signature
 //! against the coordinator keys they start with.
 //!
 //! People also sign in here with an email and a password; the coordinator
@@ -20,6 +22,7 @@ mod clock;
 mod coordinator_key;
 mod expiry_warnings;
 mod measurements;
+mod price_book;
 mod probe;
 mod publish;
 mod registry;
@@ -45,6 +48,7 @@ use tokio::sync::RwLock;
 use crate::accounts::Accounts;
 use crate::expiry_warnings::ExpiryWarnings;
 use crate::measurements::Measurements;
+use crate::price_book::PriceBook;
 use crate::registry::Registry;
 use crate::routes::Coordinator;
 use crate::token_issuer::TokenIssuer;
@@ -55,17 +59,19 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// A coordinator's registry, accounts and key, from its data directory:
 ///
 /// ```text
-/// <data>/coordinator.key      the key snapshots are signed with
-/// <data>/registry.sqlite3     node records and check results
-/// <data>/measurements.sqlite3 speed tests and node losses
-/// <data>/accounts.sqlite3    what checking a sign-in needs
-/// <data>/tokens.sqlite3       token keys, issued counts, spent tokens
-/// <data>/warnings.sqlite3     expiry warnings sent
-/// <data>/outbox/              warning emails for the mail tool to send
+/// <data>/coordinator.key       the key snapshots are signed with
+/// <data>/registry.sqlite3      node records and check results
+/// <data>/measurements.sqlite3  speed tests, node losses and usage
+/// <data>/prices.sqlite3        the signed price table of every day
+/// <data>/accounts.sqlite3      what checking a sign-in needs
+/// <data>/tokens.sqlite3        token keys, issued counts, spent tokens
+/// <data>/warnings.sqlite3      expiry warnings sent
+/// <data>/outbox/               warning emails for the mail tool to send
 /// ```
 pub struct CoordinatorData {
     registry: Registry,
     measurements: Measurements,
+    prices: PriceBook,
     accounts: Accounts,
     tokens: TokenIssuer,
     warnings: ExpiryWarnings,
@@ -96,6 +102,7 @@ impl CoordinatorData {
         Ok(CoordinatorData {
             registry: Registry::open(directory)?,
             measurements: Measurements::open(directory)?,
+            prices: PriceBook::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
             tokens: TokenIssuer::open(directory)?,
             warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
@@ -124,12 +131,14 @@ pub async fn serve(
     let measurements = Arc::new(data.measurements);
     let tokens = Arc::new(data.tokens);
     let latest = Arc::new(RwLock::new(None));
+    let prices = Arc::new(RwLock::new(None));
     let coordinator = Coordinator {
         registry: registry.clone(),
         accounts: Arc::new(data.accounts),
         tokens: tokens.clone(),
         key: data.key.clone(),
         latest: latest.clone(),
+        prices: prices.clone(),
         http: http.clone(),
         max_record_age_seconds: settings.max_record_age.as_secs(),
         monthly_allowance: settings.monthly_allowance,
@@ -141,6 +150,7 @@ pub async fn serve(
         () = probe::probe_forever(http, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = speed_test::measure_forever(registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
+        () = price_book::price_forever(data.prices, data.key.clone(), latest.clone(), prices, settings.clone()) => Ok(()),
         () = publish::publish_forever(registry, measurements, data.key, latest, settings) => Ok(()),
     }
 }
