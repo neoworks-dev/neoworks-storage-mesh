@@ -34,6 +34,8 @@ pub struct CoordinatorSettings {
     pub monthly_allowance: u64,
     /// The nodes the coordinator runs itself, which take allowance tokens.
     pub own_nodes: Vec<NodeId>,
+    /// How often what nodes earned is settled and credited to operators.
+    pub earnings_interval: Duration,
     /// How often the coordinator looks for accounts to warn about expiry.
     pub warning_interval: Duration,
     /// How far into a month an account that has not taken its tokens gets
@@ -50,7 +52,7 @@ impl Default for CoordinatorSettings {
     /// has it; uptime over one day; a speed test every hour, with bandwidth
     /// over a week; nodes lost after a week of silence, counted over 90
     /// days; records at most ten minutes off; 40 allowance tokens per account
-    /// and month, and no own nodes; warnings a week into the month and three
+    /// and month, and no own nodes; earnings paid out every hour; warnings a week into the month and three
     /// days before the end, looked for every hour.
     fn default() -> Self {
         CoordinatorSettings {
@@ -64,6 +66,7 @@ impl Default for CoordinatorSettings {
             max_record_age: Duration::from_secs(10 * 60),
             monthly_allowance: 40,
             own_nodes: Vec::new(),
+            earnings_interval: Duration::from_secs(60 * 60),
             warning_interval: Duration::from_secs(60 * 60),
             first_warning_after: Duration::from_secs(7 * 24 * 60 * 60),
             final_warning_before: Duration::from_secs(3 * 24 * 60 * 60),

@@ -1,5 +1,6 @@
-//! The coordinator's HTTP interface: nodes register, clients fetch the node
-//! list and the prices, and people sign up and sign in ([`sign_in_routes`]).
+//! The coordinator's HTTP interface: nodes register and name their operator,
+//! clients fetch the node list and the prices, and people sign up and sign
+//! in ([`sign_in_routes`]).
 
 use std::sync::Arc;
 
@@ -9,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mesh_core::NodeId;
+use mesh_core::earnings::{OPERATOR_ROUTE, OperatorClaim};
 use mesh_core::node_list::NodeRecord;
 use mesh_core::prices::PRICES_ROUTE;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
@@ -16,6 +18,7 @@ use mesh_core::signed::{Signed, SigningKey};
 
 use crate::accounts::Accounts;
 use crate::clock::unix_now;
+use crate::earnings::{Earnings, Linked};
 use crate::price_book::LatestPrices;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
@@ -28,6 +31,7 @@ use crate::token_routes;
 #[derive(Clone)]
 pub struct Coordinator {
     pub registry: Arc<Registry>,
+    pub earnings: Arc<Earnings>,
     pub accounts: Arc<Accounts>,
     pub tokens: Arc<TokenIssuer>,
     /// The coordinator's key, which signs token keys.
@@ -47,6 +51,7 @@ pub struct Coordinator {
 pub fn router(coordinator: Coordinator) -> Router {
     Router::new()
         .route(REGISTER_ROUTE, post(register))
+        .route(OPERATOR_ROUTE, post(claim_operator))
         .route(NODE_LIST_ROUTE, get(node_list))
         .route(PRICES_ROUTE, get(prices))
         .merge(sign_in_routes::routes())
@@ -79,6 +84,36 @@ async fn register(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// `POST /nodes/operator`: sends a node's earnings to the account it names.
+async fn claim_operator(
+    State(coordinator): State<Coordinator>,
+    Json(claim): Json<Signed<OperatorClaim>>,
+) -> Response {
+    // Only the node's own key may say where its earnings go.
+    if claim.verify().is_err() || NodeId::of(&claim.signer) != claim.body.node_id {
+        let reason = "the claim is not signed by the node it names";
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    let age = unix_now().abs_diff(claim.body.signed_at);
+    if age > coordinator.max_record_age_seconds {
+        let reason = format!("the claim was signed {age} seconds from now");
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    let OperatorClaim {
+        node_id,
+        email,
+        signed_at,
+    } = &claim.body;
+    match coordinator.earnings.link(node_id, email, *signed_at).await {
+        Ok(Linked::Stored) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Linked::Stale) => {
+            let reason = "a claim of this node signed at the same time or later is held";
+            (StatusCode::CONFLICT, reason).into_response()
+        }
         Err(error) => internal_error(error),
     }
 }

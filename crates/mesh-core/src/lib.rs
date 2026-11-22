@@ -7,6 +7,7 @@
 //! requests between them look like.
 
 mod canonical_hex;
+pub mod earnings;
 pub mod merkle;
 mod node_id;
 pub mod node_list;

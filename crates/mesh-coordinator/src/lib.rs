@@ -14,13 +14,16 @@
 //! key it never sees. Signed-in accounts take tokens, signed blind: free
 //! allowance tokens each month, which only the coordinator's own nodes take,
 //! and paid ones out of their balance. The coordinator keeps the list of
-//! spent ones. An account that stops taking tokens gets warned by email before its
-//! data expires. The `mesh-coordinator` binary runs
-//! one; tests start coordinators in-process through [`serve`].
+//! spent ones, and pays what a node was paid to its operator's balance over
+//! the month, for as long as the node stays up. An account that stops taking
+//! tokens gets warned by email before its data expires. The
+//! `mesh-coordinator` binary runs one; tests start coordinators in-process
+//! through [`serve`].
 
 mod accounts;
 mod clock;
 mod coordinator_key;
+mod earnings;
 mod expiry_warnings;
 mod measurements;
 mod price_book;
@@ -47,6 +50,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::accounts::Accounts;
+use crate::earnings::Earnings;
 use crate::expiry_warnings::ExpiryWarnings;
 use crate::measurements::Measurements;
 use crate::price_book::PriceBook;
@@ -64,6 +68,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/registry.sqlite3      node records and check results
 /// <data>/measurements.sqlite3  speed tests, node losses and usage
 /// <data>/prices.sqlite3        the signed price table of every day
+/// <data>/earnings.sqlite3      what operators earned and the repair pool
 /// <data>/accounts.sqlite3      what checking a sign-in needs
 /// <data>/tokens.sqlite3        token keys, issued counts, spent tokens
 /// <data>/warnings.sqlite3      expiry warnings sent
@@ -73,6 +78,7 @@ pub struct CoordinatorData {
     registry: Registry,
     measurements: Measurements,
     prices: PriceBook,
+    earnings: Earnings,
     accounts: Accounts,
     tokens: TokenIssuer,
     warnings: ExpiryWarnings,
@@ -104,6 +110,7 @@ impl CoordinatorData {
             registry: Registry::open(directory)?,
             measurements: Measurements::open(directory)?,
             prices: PriceBook::open(directory)?,
+            earnings: Earnings::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
             tokens: TokenIssuer::open(directory)?,
             warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
@@ -137,11 +144,13 @@ pub async fn serve(
         .map_err(std::io::Error::other)?;
     let registry = Arc::new(data.registry);
     let measurements = Arc::new(data.measurements);
+    let earnings = Arc::new(data.earnings);
     let tokens = Arc::new(data.tokens);
     let latest = Arc::new(RwLock::new(None));
     let prices = Arc::new(RwLock::new(None));
     let coordinator = Coordinator {
         registry: registry.clone(),
+        earnings: earnings.clone(),
         accounts: Arc::new(data.accounts),
         tokens: tokens.clone(),
         key: data.key.clone(),
@@ -158,6 +167,7 @@ pub async fn serve(
         result = server => result,
         () = probe::probe_forever(http, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = speed_test::measure_forever(registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
+        () = earnings::pay_out_forever(earnings, registry.clone(), tokens.clone(), settings.clone()) => Ok(()),
         () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
         () = price_book::price_forever(data.prices, data.key.clone(), latest.clone(), prices, settings.clone()) => Ok(()),
         () = publish::publish_forever(registry, measurements, data.key, latest, settings) => Ok(()),

@@ -39,8 +39,10 @@ nodes and coordinators can't tell whose they are. Nodes never set prices:
 coordinators put each node in a class by its uptime and speed and move each
 class's price once a day by how full it is. Every account gets a free
 allowance each month, which only the coordinator's own nodes take, and buys
-more. Tokens can never be turned back into money. The issues track what
-comes next.
+more. A node's operator earns what users pay the node, over the month and
+only while the node stays up, and can spend it on storage of their own.
+Tokens can never be turned back into money. The issues track what comes
+next.
 
 ## Layout
 

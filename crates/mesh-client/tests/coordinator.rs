@@ -63,6 +63,7 @@ async fn a_file_is_stored_on_nodes_from_the_coordinator() {
             network: format!("network-{index}"),
             region: "de".into(),
             capacity_bytes: 1 << 40,
+            operator_email: None,
         };
         register(&http, &node.key, &registration).await.unwrap();
     }

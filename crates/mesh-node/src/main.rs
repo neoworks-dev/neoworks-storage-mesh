@@ -46,7 +46,8 @@ struct Arguments {
     registration: RegistrationArguments,
 }
 
-/// Where and as what to register; all or nothing.
+/// Where and as what to register; all or nothing, except the operator's
+/// email, which is optional.
 #[derive(Args)]
 #[group(requires_all = ["coordinator", "public_url", "operator", "network", "region", "capacity_gb"], multiple = true)]
 struct RegistrationArguments {
@@ -68,6 +69,9 @@ struct RegistrationArguments {
     /// How many gigabytes the node offers to store.
     #[arg(long)]
     capacity_gb: Option<u64>,
+    /// The email of the account the node's earnings for hosting go to.
+    #[arg(long)]
+    operator_email: Option<String>,
 }
 
 impl RegistrationArguments {
@@ -81,6 +85,7 @@ impl RegistrationArguments {
             network: self.network?,
             region: self.region?,
             capacity_bytes: self.capacity_gb? * 1_000_000_000,
+            operator_email: self.operator_email,
         })
     }
 }

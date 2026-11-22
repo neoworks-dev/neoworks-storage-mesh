@@ -9,8 +9,9 @@ use axum::{Json, Router};
 use mesh_core::NodeId;
 use mesh_core::signed::Signed;
 use mesh_core::tokens::{
-    ISSUE_ROUTE, IssueRequest, IssueResponse, MAX_ISSUE_PER_REQUEST, MONTH_TOKEN_KEY_ROUTE,
-    SPEND_ROUTE, SpendRequest, SpendResponse, TOKEN_KEY_ROUTE, TokenKey, TokenKind, month_of,
+    ISSUE_ROUTE, IssueRequest, IssueResponse, MAX_ISSUE_PER_REQUEST, MICROTOKENS_PER_TOKEN,
+    MONTH_SECONDS, MONTH_TOKEN_KEY_ROUTE, SPEND_ROUTE, SpendRequest, SpendResponse,
+    TOKEN_KEY_ROUTE, TokenKey, TokenKind, month_of,
 };
 
 use crate::clock::unix_now;
@@ -129,8 +130,25 @@ async fn spend(
         let reason = "allowance tokens are only taken by the coordinator's own nodes";
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
-    match coordinator.tokens.spend(token, month_of(unix_now())).await {
-        Ok(Spent::Now) => Json(SpendResponse { spent_now: true }).into_response(),
+    let now = unix_now();
+    match coordinator.tokens.spend(token, month_of(now)).await {
+        Ok(Spent::Now) => {
+            // A paid token's value goes to the node's operator over the month
+            // the tab lasts; allowance tokens are taken only by the
+            // coordinator's own nodes, which earn nothing from them.
+            if token.kind == TokenKind::Paid {
+                let held = coordinator
+                    .earnings
+                    .hold(node_id, MICROTOKENS_PER_TOKEN, now, now + MONTH_SECONDS)
+                    .await;
+                // The token is spent either way; failing here only loses
+                // the operator's share, so it is logged, not refused.
+                if let Err(error) = held {
+                    eprintln!("earnings: holding a token for node {node_id}: {error}");
+                }
+            }
+            Json(SpendResponse { spent_now: true }).into_response()
+        }
         Ok(Spent::Before) => Json(SpendResponse { spent_now: false }).into_response(),
         Ok(Spent::Invalid) => (StatusCode::BAD_REQUEST, "not a valid token").into_response(),
         Err(error) => internal_error(error),

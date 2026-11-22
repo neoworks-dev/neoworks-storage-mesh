@@ -4,6 +4,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
+use mesh_core::NodeId;
+use mesh_core::earnings::{OPERATOR_ROUTE, OperatorClaim};
 use mesh_core::node_list::{CoordinatorList, NodeSnapshot};
 use mesh_core::prices::{DAY_SECONDS, PriceTable};
 use mesh_core::signed::{Signed, SigningKey};
@@ -52,6 +54,7 @@ fn registration(coordinator: &str, node_url: &str) -> Registration {
         network: "AS3320".into(),
         region: "de".into(),
         capacity_bytes: 1 << 40,
+        operator_email: None,
     }
 }
 
@@ -174,6 +177,44 @@ async fn a_node_cannot_register_another_nodes_address() {
             ..
         })
     ));
+}
+
+#[tokio::test]
+async fn a_node_names_its_operator_when_it_registers() {
+    let (_coordinator_data, coordinator, _coordinators) = start_coordinator().await;
+    let (_node_data, node_url, node_key) = start_node().await;
+    let http = reqwest::Client::new();
+    let mut with_operator = registration(&coordinator, &node_url);
+    with_operator.operator_email = Some("op@example.org".into());
+
+    let result = register(&http, &node_key, &with_operator).await;
+
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn only_the_node_itself_can_name_its_operator() {
+    let (_coordinator_data, coordinator, _coordinators) = start_coordinator().await;
+    let node = SigningKey::from_bytes(&[1; 32]);
+    let thief = SigningKey::from_bytes(&[2; 32]);
+    let claim = OperatorClaim {
+        node_id: NodeId::of(&node.verifying_key().to_bytes()),
+        email: "thief@example.org".into(),
+        signed_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
+    let response = reqwest::Client::new()
+        .post(format!("{coordinator}{OPERATOR_ROUTE}"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&Signed::sign(&thief, claim)).unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -107,6 +107,7 @@ async fn register_all(coordinator: &str, nodes: &[TestNode]) {
             network: format!("network-{index}"),
             region: "de".into(),
             capacity_bytes: 1 << 40,
+            operator_email: Some("op@example.org".into()),
         };
         register(&http, &node.key, &registration).await.unwrap();
     }

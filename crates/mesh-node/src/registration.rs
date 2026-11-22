@@ -3,14 +3,16 @@
 //!
 //! The coordinator accepts the record only once it has asked the URL in it
 //! for the node's identity and got this node's id back, so the URL has to be
-//! the one the node is reached at from outside.
+//! the one the node is reached at from outside. A node with an operator also
+//! names the operator's account, so what it earns for hosting goes there.
 
 use std::time::Duration;
 
 use mesh_core::NodeId;
+use mesh_core::earnings::{OPERATOR_ROUTE, OperatorClaim};
 use mesh_core::node_list::NodeRecord;
 use mesh_core::protocol::REGISTER_ROUTE;
-use mesh_core::signed::{Signed, SigningKey};
+use mesh_core::signed::{Signed, SignedBody, SigningKey};
 use reqwest::StatusCode;
 
 use crate::clock::unix_now;
@@ -26,6 +28,8 @@ pub struct Registration {
     pub network: String,
     pub region: String,
     pub capacity_bytes: u64,
+    /// The email of the account the node's earnings go to, if any.
+    pub operator_email: Option<String>,
 }
 
 /// A registration the coordinator did not take.
@@ -37,14 +41,16 @@ pub enum RegistrationError {
     Refused { status: StatusCode, message: String },
 }
 
-/// Registers the node with `key` as `registration` says, once.
+/// Registers the node with `key` as `registration` says, once, and names
+/// its operator if it has one.
 pub async fn register(
     http: &reqwest::Client,
     key: &SigningKey,
     registration: &Registration,
 ) -> Result<(), RegistrationError> {
-    let body = NodeRecord {
-        node_id: NodeId::of(&key.verifying_key().to_bytes()),
+    let node_id = NodeId::of(&key.verifying_key().to_bytes());
+    let record = NodeRecord {
+        node_id,
         url: registration.url.clone(),
         operator: registration.operator.clone(),
         network: registration.network.clone(),
@@ -52,13 +58,30 @@ pub async fn register(
         capacity_bytes: registration.capacity_bytes,
         signed_at: unix_now(),
     };
-    let record = Signed::sign(key, body);
-    let url = format!(
-        "{}{REGISTER_ROUTE}",
-        registration.coordinator.trim_end_matches('/')
-    );
-    // A record is plain strings and integers, which always serialize.
-    let json = serde_json::to_vec(&record).expect("a node record serializes");
+    post_signed(http, key, &registration.coordinator, REGISTER_ROUTE, record).await?;
+    let Some(email) = &registration.operator_email else {
+        return Ok(());
+    };
+    let claim = OperatorClaim {
+        node_id,
+        email: email.clone(),
+        signed_at: unix_now(),
+    };
+    post_signed(http, key, &registration.coordinator, OPERATOR_ROUTE, claim).await
+}
+
+/// Posts `body` signed with `key` to `route` at `coordinator`.
+async fn post_signed<T: SignedBody>(
+    http: &reqwest::Client,
+    key: &SigningKey,
+    coordinator: &str,
+    route: &str,
+    body: T,
+) -> Result<(), RegistrationError> {
+    let url = format!("{}{route}", coordinator.trim_end_matches('/'));
+    // Records and claims are plain strings and integers, which always
+    // serialize.
+    let json = serde_json::to_vec(&Signed::sign(key, body)).expect("a signed body serializes");
     let response = http
         .post(url)
         .header("content-type", "application/json")
