@@ -29,7 +29,7 @@ use mesh_client::placement::{Spread, choose};
 use mesh_client::tabs::new_tab_name;
 use mesh_client::{NodeClient, NodeInfo, NodeList, NodeRequestError};
 use mesh_core::chunk_registry::RegisteredPiece;
-use mesh_core::node_list::{CoordinatorKey, CoordinatorList};
+use mesh_core::node_list::{CoordinatorKey, CoordinatorList, ListedCoordinator};
 use mesh_core::tabs::storage_cost;
 use mesh_core::tokens::{MICROTOKENS_PER_TOKEN, MONTH_SECONDS, month_of};
 use mesh_core::{NodeId, PieceId};
@@ -86,9 +86,14 @@ impl Repairer {
         let Some(snapshot) = self.latest.read().await.clone() else {
             return Ok(None);
         };
+        // Checking the snapshot looks at keys only, so this list of just
+        // this coordinator needs no URL.
         let own = CoordinatorList {
             version: 0,
-            keys: vec![self.own_key],
+            coordinators: vec![ListedCoordinator {
+                key: self.own_key,
+                url: String::new(),
+            }],
         };
         // The coordinator signed it itself, so this only fails if the key
         // changed under it; then there is nothing to place on until the next

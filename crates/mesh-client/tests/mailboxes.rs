@@ -14,7 +14,7 @@ use mesh_client::mailboxes::{
 use mesh_client::sign_in::{auth_key, sign_up};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::mailbox::{MailboxKind, personal_address, week_of};
-use mesh_core::node_list::CoordinatorList;
+use mesh_core::node_list::{CoordinatorList, ListedCoordinator};
 use mesh_core::sign_in::KdfParams;
 use mesh_node::NodeSettings;
 use reqwest::StatusCode;
@@ -117,16 +117,19 @@ async fn a_message_without_work_is_refused_at_a_personal_mailbox() {
 async fn mailbox_keys_are_found_by_email_and_unknown_emails_look_alike() {
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: coordinator.clone(),
+        }],
     };
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_secs(60),
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     let client = NodeClient::new().unwrap();
     let ana = Account::generate();

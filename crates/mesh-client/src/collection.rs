@@ -22,6 +22,7 @@
 
 use std::time::Duration;
 
+use mesh_core::node_list::CoordinatorList;
 use mesh_core::pointer::SigningKey;
 use serde::{Deserialize, Serialize};
 
@@ -112,9 +113,9 @@ pub struct Writer<'a> {
     pub device: String,
     /// How long commits and the pointer are stored.
     pub lease: Duration,
-    /// The coordinator to register commits with, so it repairs them while
+    /// The coordinators to register commits with, so they repair them while
     /// the writer's devices are off; `None` for none.
-    pub coordinator: Option<&'a str>,
+    pub coordinators: Option<&'a CoordinatorList>,
 }
 
 /// Why a collection could not be read or saved.
@@ -327,9 +328,9 @@ impl Collection {
             writer.lease,
         )
         .await?;
-        if let Some(coordinator) = writer.coordinator {
+        if let Some(coordinators) = writer.coordinators {
             let expires_at = unix_now() + writer.lease.as_secs();
-            register(writer.client, coordinator, &reference.manifest, expires_at).await?;
+            register(writer.client, coordinators, &reference.manifest, expires_at).await?;
         }
         self.graph.insert(reference.id, commit);
         Ok(reference)

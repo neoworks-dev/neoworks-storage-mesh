@@ -74,10 +74,13 @@ target/release/mesh-coordinator --listen 127.0.0.1:7000 --data data/coordinator 
 ```
 
 It prints its key, which clients check its node list against. Copy it into
-`coordinators.json`:
+`coordinators.json`, next to where clients reach the coordinator:
 
 ```json
-{ "version": 1, "keys": ["<the coordinator key>"] }
+{
+  "version": 1,
+  "coordinators": [{ "key": "<the coordinator key>", "url": "http://127.0.0.1:7000" }]
+}
 ```
 
 Start seven nodes that register with it. On one machine every node needs its

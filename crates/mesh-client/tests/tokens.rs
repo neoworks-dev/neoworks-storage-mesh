@@ -8,7 +8,7 @@ use mesh_client::sign_in::{auth_key, sign_up};
 use mesh_client::tokens::{TokenError, get_tokens, token_key};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::NodeId;
-use mesh_core::node_list::CoordinatorList;
+use mesh_core::node_list::{CoordinatorList, ListedCoordinator};
 use mesh_core::sign_in::KdfParams;
 use mesh_core::signed::{Signed, SigningKey};
 use mesh_core::tokens::{SpendRequest, SpendResponse, Token, TokenKind};
@@ -42,9 +42,14 @@ async fn start() -> (TempDir, String, CoordinatorList, [u8; 32]) {
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
     data.credit("ana@example.org", 3).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: url.clone(),
+        }],
     };
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_secs(60),
@@ -52,8 +57,6 @@ async fn start() -> (TempDir, String, CoordinatorList, [u8; 32]) {
         own_nodes: vec![id_of(&own_node())],
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     let client = NodeClient::new().unwrap();
     sign_up(
