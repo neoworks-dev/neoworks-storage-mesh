@@ -5,6 +5,7 @@
 //! with the owner. Storing manifests in the mesh itself, encrypted, comes later.
 
 use mesh_core::PieceId;
+use mesh_core::merkle::MerkleHash;
 use serde::{Deserialize, Serialize};
 
 use crate::encryption::FileKey;
@@ -34,6 +35,10 @@ pub struct ChunkRecord {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlacedPiece {
     pub id: PieceId,
+    /// The root of the piece's segment tree, which lets anyone holding the
+    /// manifest check that the node still has the piece without downloading
+    /// it. It reveals nothing about the piece's contents.
+    pub merkle_root: MerkleHash,
     /// The node's base URL, e.g. `http://127.0.0.1:7001`.
     pub node: String,
 }

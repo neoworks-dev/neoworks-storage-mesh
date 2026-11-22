@@ -5,7 +5,7 @@
 //! a piece directly, since a node does not know whose piece it is; letting a
 //! lease run out is how data is deleted.
 //!
-//! A node answers three requests:
+//! A node answers four requests:
 //!
 //! - `PUT /pieces/{id}?lease_seconds=N` with the piece's bytes as the body
 //!   stores it for `N` seconds. The node refuses bytes that do not hash to
@@ -13,6 +13,9 @@
 //! - `POST /pieces/{id}/lease?lease_seconds=N` renews the lease to end no
 //!   sooner than `N` seconds from now, or answers `404 Not Found`.
 //! - `GET /pieces/{id}` returns the bytes, or `404 Not Found`.
+//! - `POST /pieces/{id}/challenge` with a [`ChallengeRequest`] returns a
+//!   [`ChallengeResponse`]: the segments asked for, each with its Merkle
+//!   proof, or `404 Not Found`.
 //!
 //! Storing and renewing both answer with a [`LeaseResponse`] in JSON.
 //! Lease ends are Unix times in seconds on the node's clock; clients send a
@@ -21,12 +24,34 @@
 use serde::{Deserialize, Serialize};
 
 use crate::PieceId;
+use crate::merkle::SegmentProof;
 
 /// The route of a piece, in the router syntax of `axum`.
 pub const PIECE_ROUTE: &str = "/pieces/{id}";
 
 /// The route of a piece's lease, in the router syntax of `axum`.
 pub const LEASE_ROUTE: &str = "/pieces/{id}/lease";
+
+/// The route of a storage challenge, in the router syntax of `axum`.
+pub const CHALLENGE_ROUTE: &str = "/pieces/{id}/challenge";
+
+/// The most segments one challenge may ask for. A few random segments already
+/// catch a node that dropped a piece; the limit keeps a challenge from making
+/// a node do much work.
+pub const MAX_CHALLENGE_SEGMENTS: usize = 64;
+
+/// A storage challenge: the segments of a piece the node has to return.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChallengeRequest {
+    pub segments: Vec<u32>,
+}
+
+/// The answer to a storage challenge: one proof per segment asked for, in the
+/// order they were asked for.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChallengeResponse {
+    pub proofs: Vec<SegmentProof>,
+}
 
 /// The largest piece a node accepts. Clients cut data so that every piece
 /// stays below it; nodes use it to refuse oversized uploads before reading
@@ -55,4 +80,9 @@ pub fn piece_path(id: &PieceId) -> String {
 /// The path of the lease of the piece `id`, e.g. `/pieces/af13…/lease`.
 pub fn lease_path(id: &PieceId) -> String {
     format!("/pieces/{id}/lease")
+}
+
+/// The path of a storage challenge for the piece `id`.
+pub fn challenge_path(id: &PieceId) -> String {
+    format!("/pieces/{id}/challenge")
 }

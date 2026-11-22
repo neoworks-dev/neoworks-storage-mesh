@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use futures::future::try_join_all;
-use mesh_core::PieceId;
 use mesh_core::protocol::MAX_PIECE_BYTES;
+use mesh_core::{PieceId, merkle};
 
 use crate::encryption::{FileKey, SEAL_OVERHEAD, seal_chunk};
 use crate::erasure::{DATA_PIECES, TOTAL_PIECES, cut};
@@ -75,9 +75,11 @@ async fn store_pieces(
 ) -> Result<Vec<PlacedPiece>, NodeRequestError> {
     let puts = nodes.iter().zip(pieces).map(|(node, bytes)| async move {
         let id = PieceId::of(&bytes);
+        let merkle_root = merkle::root_of(&bytes);
         client.put(node, &id, bytes, lease).await?;
         Ok(PlacedPiece {
             id,
+            merkle_root,
             node: node.clone(),
         })
     });

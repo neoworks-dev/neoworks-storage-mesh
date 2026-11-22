@@ -6,8 +6,13 @@
 use std::time::Duration;
 
 use mesh_core::PieceId;
-use mesh_core::protocol::{LeaseResponse, lease_path, piece_path};
+use mesh_core::merkle::SegmentProof;
+use mesh_core::protocol::{
+    ChallengeRequest, ChallengeResponse, LeaseResponse, challenge_path, lease_path, piece_path,
+};
+use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
+use serde::de::DeserializeOwned;
 
 /// How long one request to a node may take before the node counts as
 /// unreachable.
@@ -35,8 +40,8 @@ pub enum NodeRequestError {
     },
     #[error("node {node} returned bytes that are not piece {id}")]
     WrongBytes { node: String, id: PieceId },
-    #[error("node {node} answered something that is not a lease")]
-    NotALease { node: String },
+    #[error("node {node} answered in a form this client does not understand")]
+    UnexpectedAnswer { node: String },
 }
 
 impl NodeClient {
@@ -96,6 +101,40 @@ impl NodeClient {
         Ok(Some(read_lease_end(node, response).await?))
     }
 
+    /// Asks `node` for `segments` of the piece `id` with their Merkle proofs.
+    /// `None` when the node does not hold the piece.
+    ///
+    /// The proofs come back unchecked; [`SegmentProof::leads_to`] tells
+    /// whether they lead to the root recorded at upload.
+    pub async fn challenge(
+        &self,
+        node: &str,
+        id: &PieceId,
+        segments: &[u32],
+    ) -> Result<Option<Vec<SegmentProof>>, NodeRequestError> {
+        let request = ChallengeRequest {
+            segments: segments.to_vec(),
+        };
+        // A list of numbers always serializes.
+        let body = serde_json::to_vec(&request).expect("a challenge serializes");
+        let response = self
+            .http
+            .post(node_url(node, &challenge_path(id)))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let answer: ChallengeResponse = read_json(node, response).await?;
+        Ok(Some(answer.proofs))
+    }
+
     /// The piece `id` from `node`, or `None` when the node does not have it.
     pub async fn get(&self, node: &str, id: &PieceId) -> Result<Option<Vec<u8>>, NodeRequestError> {
         let response = self
@@ -138,12 +177,20 @@ fn with_lease(url: String, lease: Duration) -> String {
 
 /// The lease end in a successful store or renew response.
 async fn read_lease_end(node: &str, response: Response) -> Result<u64, NodeRequestError> {
-    let not_a_lease = || NodeRequestError::NotALease {
+    let lease: LeaseResponse = read_json(node, response).await?;
+    Ok(lease.expires_at)
+}
+
+/// The JSON body of a successful response.
+async fn read_json<T: DeserializeOwned>(
+    node: &str,
+    response: Response,
+) -> Result<T, NodeRequestError> {
+    let unexpected = || NodeRequestError::UnexpectedAnswer {
         node: node.to_string(),
     };
-    let body = response.bytes().await.map_err(|_| not_a_lease())?;
-    let lease: LeaseResponse = serde_json::from_slice(&body).map_err(|_| not_a_lease())?;
-    Ok(lease.expires_at)
+    let body = response.bytes().await.map_err(|_| unexpected())?;
+    serde_json::from_slice(&body).map_err(|_| unexpected())
 }
 
 /// The error for a response that is not a success, with the node's reason.
