@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use mesh_node::{NodeSettings, PieceStore};
+use mesh_node::{NodeSettings, PieceStore, PointerStore};
 use tokio::net::TcpListener;
 
 /// Runs a storage node that keeps pieces in a directory.
@@ -37,10 +37,12 @@ async fn main() -> anyhow::Result<()> {
     let store = PieceStore::open(&arguments.data)
         .await
         .with_context(|| format!("opening {}", arguments.data.display()))?;
+    let pointers = PointerStore::open(&arguments.data)
+        .with_context(|| format!("opening the pointers in {}", arguments.data.display()))?;
     let listener = TcpListener::bind(arguments.listen)
         .await
         .with_context(|| format!("listening on {}", arguments.listen))?;
     println!("node listening on http://{}", arguments.listen);
-    mesh_node::serve(listener, store, settings).await?;
+    mesh_node::serve(listener, store, pointers, settings).await?;
     Ok(())
 }

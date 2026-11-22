@@ -98,6 +98,23 @@ impl Pointer {
     }
 }
 
+/// The owner key written as 64 lowercase hex digits, as it is in URLs, or
+/// `None` for any other text.
+pub fn parse_owner(text: &str) -> Option<[u8; 32]> {
+    // Only the canonical form is accepted, so every owner has exactly one
+    // URL and a node cannot end up holding two records for one key.
+    let is_canonical = text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !is_canonical {
+        return None;
+    }
+    let mut owner = [0u8; 32];
+    hex::decode_to_slice(text, &mut owner).ok()?;
+    Some(owner)
+}
+
 fn check_target_len(target: &[u8]) -> Result<(), PointerError> {
     if target.len() > MAX_TARGET_BYTES {
         return Err(PointerError::TargetTooLarge { len: target.len() });
@@ -176,6 +193,17 @@ mod tests {
                 len: MAX_TARGET_BYTES + 1
             }
         );
+    }
+
+    #[test]
+    fn owners_parse_only_in_canonical_form() {
+        let owner = key(1).verifying_key().to_bytes();
+        let text = hex::encode(owner);
+
+        assert_eq!(parse_owner(&text), Some(owner));
+        assert_eq!(parse_owner(&text.to_uppercase()), None);
+        assert_eq!(parse_owner(&text[1..]), None);
+        assert_eq!(parse_owner("../etc/passwd"), None);
     }
 
     #[test]

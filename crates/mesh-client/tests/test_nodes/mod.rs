@@ -12,7 +12,7 @@ use mesh_client::{
     ChunkRecord, DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, PlacedPiece,
     UploadError, download, upload,
 };
-use mesh_node::{NodeSettings, PieceStore};
+use mesh_node::{NodeSettings, PieceStore, PointerStore};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -28,9 +28,10 @@ impl TestNode {
     pub async fn start(settings: NodeSettings) -> TestNode {
         let data = tempfile::tempdir().unwrap();
         let store = PieceStore::open(data.path()).await.unwrap();
+        let pointers = PointerStore::open(data.path()).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(mesh_node::serve(listener, store, settings));
+        let server = tokio::spawn(mesh_node::serve(listener, store, pointers, settings));
         TestNode { url, data, server }
     }
 

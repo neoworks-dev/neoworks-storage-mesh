@@ -5,7 +5,7 @@
 //! a piece directly, since a node does not know whose piece it is; letting a
 //! lease run out is how data is deleted.
 //!
-//! A node answers four requests:
+//! A node answers these requests about pieces:
 //!
 //! - `PUT /pieces/{id}?lease_seconds=N` with the piece's bytes as the body
 //!   stores it for `N` seconds. The node refuses bytes that do not hash to
@@ -17,6 +17,16 @@
 //!   [`ChallengeResponse`]: the segments asked for, each with its Merkle
 //!   proof, or `404 Not Found`.
 //!
+//! And these about signed pointers, filed under the owner's public key in hex:
+//!
+//! - `PUT /pointers/{owner}?lease_seconds=N` with a [`Pointer`] in JSON as
+//!   the body stores it, when its signature holds and its version is higher
+//!   than the one the node has. The same record again only extends its
+//!   lease. Any other record answers `409 Conflict` with a
+//!   [`PointerConflict`].
+//! - `GET /pointers/{owner}` returns the newest [`Pointer`] the node holds,
+//!   or `404 Not Found`.
+//!
 //! Storing and renewing both answer with a [`LeaseResponse`] in JSON.
 //! Lease ends are Unix times in seconds on the node's clock; clients send a
 //! length rather than an end, so their clocks never have to agree with it.
@@ -25,6 +35,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::PieceId;
 use crate::merkle::SegmentProof;
+#[cfg(doc)]
+use crate::pointer::Pointer;
 
 /// The route of a piece, in the router syntax of `axum`.
 pub const PIECE_ROUTE: &str = "/pieces/{id}";
@@ -85,4 +97,20 @@ pub fn lease_path(id: &PieceId) -> String {
 /// The path of a storage challenge for the piece `id`.
 pub fn challenge_path(id: &PieceId) -> String {
     format!("/pieces/{id}/challenge")
+}
+
+/// The route of a pointer, in the router syntax of `axum`.
+pub const POINTER_ROUTE: &str = "/pointers/{owner}";
+
+/// The path of the pointer of `owner`, e.g. `/pointers/3d4f…`.
+pub fn pointer_path(owner: &[u8; 32]) -> String {
+    format!("/pointers/{}", hex::encode(owner))
+}
+
+/// The answer to storing a pointer that is not newer than the one the node
+/// holds.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PointerConflict {
+    /// The version of the record the node keeps.
+    pub held_version: u64,
 }

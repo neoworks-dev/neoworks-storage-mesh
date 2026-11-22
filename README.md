@@ -11,6 +11,8 @@ it into erasure-coded pieces and spread those over independent nodes.
 - **Nodes** store pieces addressed by their hash, return them, prove they still
   hold them, and delete them when their lease is not renewed. A piece is noise
   to them: they see its size, when it arrived and the address that sent it.
+  Nodes also keep signed pointers, small records under an owner's public key
+  that say where the newest version of something is.
 - **Coordinators** track the network, never anyone's data: the list of nodes
   and their reliability, the storage allowance of each account, the list of
   spent tokens, and sign-in. NeoWorks runs the first ones; the set of
