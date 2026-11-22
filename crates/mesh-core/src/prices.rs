@@ -20,10 +20,13 @@
 //! the same inputs and check a coordinator's.
 //!
 //! One token is worth 0.1 euro cents. Prices are per TB of piece bytes and
-//! month: a file stored as 4 + 2 pieces fills 1.5 times its size.
+//! month, since that is what nodes hold: a file stored as 4 + 2 pieces fills
+//! 1.5 times its size. Users think in TB of their files, so prices start from
+//! what a TB of file costs in the default layout.
 
 use serde::{Deserialize, Serialize};
 
+use crate::layout::Layout;
 use crate::node_list::{ListedNode, NodeSnapshot};
 use crate::signed::SignedBody;
 
@@ -67,8 +70,8 @@ pub struct ClassRule {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassPrice {
     pub class: NodeClass,
-    /// Tokens per TB of piece bytes and month. At 0.1 cents a token, 8,000
-    /// is 8 euros.
+    /// Tokens per TB of piece bytes and month. At 0.1 cents a token, 1,000
+    /// is 1 euro.
     pub tokens_per_tb_month: u64,
 }
 
@@ -89,10 +92,11 @@ impl SignedBody for PriceTable {
 }
 
 impl PriceTable {
-    /// The table prices start from: 8 euros per TB and month on fast nodes,
-    /// which is what NeoWorks charges on its servers, and less on slower
-    /// ones. The thresholds and the lower prices are a starting guess that
-    /// demand corrects.
+    /// The table prices start from: 8 euros per TB of file and month on fast
+    /// nodes in the default 4 + 2 layout, which is what NeoWorks charges on
+    /// its servers, and half and a quarter of that on slower ones. The
+    /// thresholds and the lower prices are a starting guess that demand
+    /// corrects.
     pub fn starting(day: u64) -> Self {
         PriceTable {
             day,
@@ -116,15 +120,15 @@ impl PriceTable {
             prices: vec![
                 ClassPrice {
                     class: NodeClass::Fast,
-                    tokens_per_tb_month: 8_000,
+                    tokens_per_tb_month: per_piece_tb(8_000),
                 },
                 ClassPrice {
                     class: NodeClass::Standard,
-                    tokens_per_tb_month: 4_000,
+                    tokens_per_tb_month: per_piece_tb(4_000),
                 },
                 ClassPrice {
                     class: NodeClass::Archive,
-                    tokens_per_tb_month: 2_000,
+                    tokens_per_tb_month: per_piece_tb(2_000),
                 },
             ],
         }
@@ -206,6 +210,14 @@ fn use_permille(table: &PriceTable, snapshot: &NodeSnapshot, class: NodeClass) -
 }
 
 /// `price` moved by how far `used_permille` is from the target.
+/// The price per TB of pieces at which a TB of file in the default layout
+/// costs `tokens_per_file_tb`, rounded to the nearest token.
+const fn per_piece_tb(tokens_per_file_tb: u64) -> u64 {
+    let data = Layout::DEFAULT.data() as u64;
+    let total = Layout::DEFAULT.total() as u64;
+    (tokens_per_file_tb * data + total / 2) / total
+}
+
 fn next_price(price: u64, used_permille: i64) -> u64 {
     let change = ((used_permille - TARGET_USE_PERMILLE) / 10)
         .clamp(-MAX_DAILY_CHANGE_PERMILLE, MAX_DAILY_CHANGE_PERMILLE);
@@ -299,10 +311,19 @@ mod tests {
         );
 
         assert_eq!(next.day, 11);
-        assert_eq!(next.price_of(NodeClass::Fast), Some(8_240));
+        assert_eq!(next.price_of(NodeClass::Fast), Some(5_492));
         // No standard nodes: the price stays.
-        assert_eq!(next.price_of(NodeClass::Standard), Some(4_000));
-        assert_eq!(next.price_of(NodeClass::Archive), Some(1_900));
+        assert_eq!(next.price_of(NodeClass::Standard), Some(2_667));
+        assert_eq!(next.price_of(NodeClass::Archive), Some(1_266));
+    }
+
+    #[test]
+    fn a_tb_of_file_in_the_default_layout_starts_at_8_euros_on_fast_nodes() {
+        let table = PriceTable::starting(0);
+
+        assert_eq!(table.price_of(NodeClass::Fast), Some(5_333));
+        assert_eq!(table.price_of(NodeClass::Standard), Some(2_667));
+        assert_eq!(table.price_of(NodeClass::Archive), Some(1_333));
     }
 
     #[test]
@@ -312,6 +333,6 @@ mod tests {
 
         let next = next_table(&previous, &snapshot(vec![overfull]), 1);
 
-        assert_eq!(next.price_of(NodeClass::Fast), Some(8_240));
+        assert_eq!(next.price_of(NodeClass::Fast), Some(5_492));
     }
 }

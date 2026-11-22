@@ -31,8 +31,9 @@ pub struct CoordinatorSettings {
     /// The span the loss rate is measured over.
     pub loss_window: Duration,
     /// The allowance tokens each signed-in account gets per month, which only
-    /// the coordinator's own nodes take. 40 tokens are 5 GB for a month at
-    /// the starting price of fast nodes, 8,000 tokens per TB.
+    /// the coordinator's own nodes take. 40 tokens are 5 GB of file in the
+    /// default 4 + 2 layout for a month at the starting price of fast nodes,
+    /// 8,000 tokens per TB of file.
     pub monthly_allowance: u64,
     /// The nodes the coordinator runs itself, which take allowance tokens.
     pub own_nodes: Vec<NodeId>,

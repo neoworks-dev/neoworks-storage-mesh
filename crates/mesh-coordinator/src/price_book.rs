@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(again, first);
         assert_eq!(next.body.day, 101);
         // No nodes, so no class moved.
-        assert_eq!(next.body.price_of(NodeClass::Fast), Some(8_000));
+        assert_eq!(next.body.price_of(NodeClass::Fast), Some(5_333));
     }
 
     #[tokio::test]
