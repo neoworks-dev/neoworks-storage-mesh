@@ -26,6 +26,7 @@ pub mod encryption;
 pub mod erasure;
 mod manifest;
 mod node_client;
+mod node_latency;
 mod node_list;
 pub mod placement;
 mod random;

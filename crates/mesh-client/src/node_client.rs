@@ -3,6 +3,7 @@
 //! Nodes are not trusted, so every piece that comes back is hashed and
 //! compared with the id it was asked for.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use mesh_core::PieceId;
@@ -14,14 +15,19 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
 use serde::de::DeserializeOwned;
 
+use crate::node_latency::LatencyTable;
+
 /// How long one request to a node may take before the node counts as
 /// unreachable.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Talks to nodes over HTTP, reusing connections between requests.
+/// Talks to nodes over HTTP, reusing connections between requests, and
+/// remembers how fast each node answered its last piece fetch. Clones share
+/// both.
 #[derive(Clone)]
 pub struct NodeClient {
     http: reqwest::Client,
+    latencies: Arc<LatencyTable>,
 }
 
 /// A request to a node that did not succeed.
@@ -50,7 +56,15 @@ impl NodeClient {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()?;
-        Ok(NodeClient { http })
+        Ok(NodeClient {
+            http,
+            latencies: Arc::default(),
+        })
+    }
+
+    /// How long each node took to answer its last piece fetch.
+    pub(crate) fn latencies(&self) -> &LatencyTable {
+        &self.latencies
     }
 
     /// Stores `bytes` as the piece `id` on `node` for `lease`, and returns
@@ -136,7 +150,11 @@ impl NodeClient {
     }
 
     /// The piece `id` from `node`, or `None` when the node does not have it.
+    ///
+    /// The time the request runs, answered, failed or cancelled, is recorded
+    /// as the node's latency.
     pub async fn get(&self, node: &str, id: &PieceId) -> Result<Option<Vec<u8>>, NodeRequestError> {
+        let _timer = self.latencies.start_timer(node);
         let response = self
             .http
             .get(node_url(node, &piece_path(id)))

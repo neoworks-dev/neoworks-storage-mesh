@@ -1,12 +1,22 @@
 //! Getting a file back: fetch each chunk's pieces, rebuild, open, write.
 
-use futures::future::join_all;
+use std::time::Duration;
+
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
 
 use crate::encryption::open;
-use crate::erasure::{RebuildError, rebuild};
+use crate::erasure::{DATA_PIECES, RebuildError, rebuild};
 use crate::manifest::{Manifest, PlacedPiece};
 use crate::node_client::NodeClient;
+use crate::node_latency::LatencyTable;
+
+/// How long to wait for any of the pieces asked for before asking one more
+/// node. A healthy node on a home connection answers within it, and it is
+/// short next to the 30 seconds after which a request gives up.
+const HEDGE_DELAY: Duration = Duration::from_secs(1);
 
 /// Why a file could not be read back.
 #[derive(Debug, thiserror::Error)]
@@ -61,19 +71,111 @@ pub async fn download(
     Ok(())
 }
 
-/// Fetches every piece of a chunk at once; a piece that cannot be had is `None`.
+/// Fetches the first [`DATA_PIECES`] valid pieces of a chunk; every other
+/// piece is `None`.
 ///
-/// Asking all six nodes and waiting for every answer is the simplest correct
-/// version. Asking only the fastest few and stopping at four is #8.
+/// It asks the [`DATA_PIECES`] nodes that answered fastest last time, and
+/// one more node each time a piece fails or nothing arrives for
+/// [`HEDGE_DELAY`]. Requests still running once enough pieces are in are
+/// dropped, which cancels them.
 async fn fetch_pieces(client: &NodeClient, pieces: &[PlacedPiece]) -> Vec<Option<Vec<u8>>> {
-    let fetches = pieces.iter().map(|piece| async move {
-        match client.get(&piece.node, &piece.id).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!("{error}");
-                None
-            }
+    let mut not_asked = fastest_first(client.latencies(), pieces).into_iter();
+    let mut running = FuturesUnordered::new();
+    for index in not_asked.by_ref().take(DATA_PIECES) {
+        running.push(fetch_piece(client, pieces, index));
+    }
+    let mut found = vec![None; pieces.len()];
+    let mut arrived = 0;
+    while arrived < DATA_PIECES {
+        let answer = match timeout(HEDGE_DELAY, running.next()).await {
+            Ok(Some(answer)) => Some(answer),
+            // Every node has been asked and every request has ended.
+            Ok(None) => break,
+            Err(_) => None,
+        };
+        if let Some((index, Some(bytes))) = answer {
+            found[index] = Some(bytes);
+            arrived += 1;
+            continue;
         }
+        // A piece failed or none arrived in time: ask another node alongside.
+        if let Some(index) = not_asked.next() {
+            running.push(fetch_piece(client, pieces, index));
+        }
+    }
+    found
+}
+
+/// Piece `index` of `pieces` with its index, or `None` when it cannot be had.
+async fn fetch_piece(
+    client: &NodeClient,
+    pieces: &[PlacedPiece],
+    index: usize,
+) -> (usize, Option<Vec<u8>>) {
+    let piece = &pieces[index];
+    match client.get(&piece.node, &piece.id).await {
+        Ok(bytes) => (index, bytes),
+        Err(error) => {
+            eprintln!("{error}");
+            (index, None)
+        }
+    }
+}
+
+/// The indexes of `pieces`, those on the nodes that answered fastest last
+/// time first.
+///
+/// A node never asked counts as fast, so it gets measured. Ties keep piece
+/// order, which puts the data pieces first: when those arrive, rebuilding
+/// needs no decoding.
+fn fastest_first(latencies: &LatencyTable, pieces: &[PlacedPiece]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pieces.len()).collect();
+    order.sort_by_key(|&index| {
+        latencies
+            .last_answer(&pieces[index].node)
+            .unwrap_or(Duration::ZERO)
     });
-    join_all(fetches).await
+    order
+}
+
+#[cfg(test)]
+mod tests {
+    use mesh_core::PieceId;
+    use mesh_core::merkle::root_of;
+
+    use super::*;
+
+    fn pieces_on(nodes: &[&str]) -> Vec<PlacedPiece> {
+        nodes
+            .iter()
+            .map(|node| PlacedPiece {
+                id: PieceId::of(node.as_bytes()),
+                merkle_root: root_of(node.as_bytes()),
+                node: node.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unmeasured_nodes_keep_piece_order() {
+        let pieces = pieces_on(&["a", "b", "c", "d", "e", "f"]);
+
+        let order = fastest_first(&LatencyTable::default(), &pieces);
+
+        assert_eq!(order, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn slow_nodes_go_last_and_unmeasured_ones_first() {
+        let pieces = pieces_on(&["a", "b", "c", "d", "e", "f"]);
+        let latencies = LatencyTable::default();
+        latencies.record("a", Duration::from_millis(900));
+        latencies.record("b", Duration::from_millis(20));
+        latencies.record("c", Duration::from_millis(30));
+        latencies.record("f", Duration::from_millis(10));
+
+        let order = fastest_first(&latencies, &pieces);
+
+        assert_eq!(order, [3, 4, 5, 1, 2, 0]);
+    }
 }

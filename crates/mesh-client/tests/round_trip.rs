@@ -9,13 +9,15 @@ mod test_nodes;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mesh_client::chunking::{AVERAGE_CHUNK_BYTES, MAX_CHUNK_BYTES, MIN_CHUNK_BYTES};
 use mesh_client::erasure::RebuildError;
 use mesh_client::{DedupKey, DownloadError, Manifest, NodeClient, UploadError, upload};
 use mesh_node::NodeSettings;
-use test_nodes::{TestNode, download_bytes, node_list, random_file, start_nodes, store_on};
+use test_nodes::{
+    TestNode, download_bytes, node_list, random_file, start_nodes, start_silent_node, store_on,
+};
 use tokio::io::{AsyncRead, ReadBuf};
 
 /// Long enough that no piece expires while a test runs.
@@ -123,6 +125,38 @@ async fn survives_one_node_losing_and_one_corrupting_its_pieces() {
     nodes[2].corrupt_all_pieces();
 
     assert_eq!(read_back(&manifest).await.unwrap(), file);
+}
+
+#[tokio::test]
+async fn a_node_that_never_answers_is_passed_over_and_remembered() {
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = random_file(AVERAGE_CHUNK_BYTES * 6, 2);
+    let mut manifest = store(&nodes, &file).await.unwrap();
+    assert!(manifest.chunks.len() >= 3);
+    // Decoding and decrypting take seconds in a debug build, so the time of
+    // a read from healthy nodes is the baseline.
+    let started = Instant::now();
+    read_back(&manifest).await.unwrap();
+    let healthy = started.elapsed();
+    // Piece 0 is a data piece, so an unmeasured client asks for it first.
+    let silent = start_silent_node().await;
+    for chunk in &mut manifest.chunks {
+        chunk.pieces[0].node = silent.clone();
+    }
+
+    let started = Instant::now();
+    let read = read_back(&manifest).await.unwrap();
+    let with_silent = started.elapsed();
+
+    assert_eq!(read, file);
+    // Waiting for the silent node would take the 30-second request timeout
+    // per chunk, and hedging without remembering one second per chunk.
+    // Remembering waits one second for the first chunk only, after which the
+    // node ranks last and later chunks do not ask it.
+    assert!(
+        with_silent < healthy + Duration::from_secs(2),
+        "healthy {healthy:?}, with a silent node {with_silent:?}"
+    );
 }
 
 #[tokio::test]
