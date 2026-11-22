@@ -22,8 +22,9 @@ Early. A file can be stored on six nodes and read back while any two of them
 are down, have lost their pieces or return corrupted ones. Nodes keep each
 piece for a lease and delete it once the lease ends unless it is renewed,
 which is also how a file is deleted. An audit checks that the nodes still
-hold every piece, from a few random segments with Merkle proofs. There are
-no coordinators, tokens or repair yet; the issues track what comes next.
+hold every piece, from a few random segments with Merkle proofs, and repair
+rebuilds lost pieces onto spare nodes. There are no coordinators or tokens
+yet, and nodes are named by hand; the issues track what comes next.
 
 ## Layout
 
@@ -67,6 +68,14 @@ To check that the nodes still hold every piece, without downloading them:
 
 ```sh
 target/release/mesh audit photo.manifest.json
+```
+
+When nodes have lost pieces, rebuild them onto other nodes. Repair updates
+the manifest with where the new pieces are:
+
+```sh
+target/release/mesh-node --listen 127.0.0.1:7007 --data data/node-7 &
+target/release/mesh repair photo.manifest.json --spare-node http://127.0.0.1:7007
 ```
 
 ## License

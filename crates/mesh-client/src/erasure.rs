@@ -124,6 +124,21 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuilt_chunk_cuts_into_the_same_pieces() {
+        // Repair relies on this: a lost piece rebuilt from four others is
+        // byte for byte the piece that was lost, so its id stays valid.
+        let chunk = sample_chunk();
+        let original = cut(&chunk);
+        let mut survivors: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
+        survivors[0] = None;
+        survivors[5] = None;
+
+        let rebuilt = rebuild(&survivors, chunk.len()).unwrap();
+
+        assert_eq!(cut(&rebuilt), original);
+    }
+
+    #[test]
     fn fails_with_three_pieces_missing() {
         let chunk = sample_chunk();
         let mut pieces: Vec<Option<Vec<u8>>> = cut(&chunk).into_iter().map(Some).collect();
