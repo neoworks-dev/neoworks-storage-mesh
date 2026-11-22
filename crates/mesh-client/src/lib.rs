@@ -22,9 +22,14 @@
 //! A signed pointer ([`pointers`]) is the one place whose address does not
 //! change: it sits on nodes picked from the owner's key and says where the
 //! newest version of something is.
+//!
+//! Structured data, such as a calendar, is a [`version_graph`] of commits
+//! like git's: each device keeps the whole graph, stores its commits in the
+//! mesh, and names its newest one in a pointer of its own ([`commits`]).
 
 mod audit;
 pub mod chunking;
+pub mod commits;
 mod download;
 pub mod encryption;
 pub mod erasure;
@@ -38,6 +43,7 @@ mod random;
 mod renew;
 mod repair;
 mod upload;
+pub mod version_graph;
 
 pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHealth, audit};
 pub use download::{DownloadError, download};

@@ -17,6 +17,9 @@
 //!
 //! A sealed chunk is the ciphertext followed by a 16-byte tag; any change to
 //! it makes opening fail.
+//!
+//! Small messages that one key seals many times, such as where a pointer
+//! leads, use a [`MessageKey`] and a random nonce instead ([`seal_message`]).
 
 use chacha20poly1305::aead::{Aead, Generate, Key, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -111,6 +114,72 @@ fn payload(message: &[u8]) -> Payload<'_, 'static> {
     }
 }
 
+/// Bound into every sealed message, apart from chunks, so neither can be
+/// passed off as the other.
+const MESSAGE_ASSOCIATED_DATA: &[u8] = b"neoworks-storage-mesh/message/v1";
+
+/// The length of the random nonce in front of a sealed message.
+const MESSAGE_NONCE_BYTES: usize = 24;
+
+/// A key that seals many messages, such as the targets of a pointer that
+/// moves with every new version. Unlike a chunk key it is not derived from
+/// what it seals, so every message gets a random nonce of its own.
+#[derive(Clone)]
+pub struct MessageKey([u8; 32]);
+
+impl MessageKey {
+    /// A new random key from the operating system's random source.
+    pub fn generate() -> Self {
+        MessageKey(Key::<XChaCha20Poly1305>::generate().into())
+    }
+
+    /// The key made of `bytes`, such as one kept in a file.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        MessageKey(bytes)
+    }
+
+    fn cipher(&self) -> XChaCha20Poly1305 {
+        XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.0))
+    }
+}
+
+/// Seals `message` under `key`: a random nonce, then the ciphertext and tag.
+///
+/// 24 random bytes make a repeated nonce under one key so unlikely that a
+/// key can seal any number of messages.
+pub fn seal_message(key: &MessageKey, message: &[u8]) -> Vec<u8> {
+    let mut nonce = [0u8; MESSAGE_NONCE_BYTES];
+    getrandom::fill(&mut nonce).expect("the operating system's random source works");
+    let payload = Payload {
+        msg: message,
+        aad: MESSAGE_ASSOCIATED_DATA,
+    };
+    let ciphertext = key
+        .cipher()
+        .encrypt(&XNonce::from(nonce), payload)
+        // Encryption only fails for messages beyond 256 GiB.
+        .expect("a message is far below the cipher's length limit");
+    let mut sealed = nonce.to_vec();
+    sealed.extend_from_slice(&ciphertext);
+    sealed
+}
+
+/// Opens a message sealed by [`seal_message`].
+pub fn open_message(key: &MessageKey, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
+    if sealed.len() < MESSAGE_NONCE_BYTES {
+        return Err(OpenError);
+    }
+    let (nonce, ciphertext) = sealed.split_at(MESSAGE_NONCE_BYTES);
+    let nonce: [u8; MESSAGE_NONCE_BYTES] = nonce.try_into().map_err(|_| OpenError)?;
+    let payload = Payload {
+        msg: ciphertext,
+        aad: MESSAGE_ASSOCIATED_DATA,
+    };
+    key.cipher()
+        .decrypt(&XNonce::from(nonce), payload)
+        .map_err(|_| OpenError)
+}
+
 impl Serialize for ChunkKey {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&hex::encode(self.0))
@@ -168,6 +237,25 @@ mod tests {
         let from_bob = seal(&bob.chunk_key(b"chunk"), b"chunk");
 
         assert_ne!(from_alice, from_bob);
+    }
+
+    #[test]
+    fn a_sealed_message_opens_only_with_its_key_and_bytes() {
+        let key = MessageKey::generate();
+        let mut sealed = seal_message(&key, b"newest head");
+
+        assert_eq!(open_message(&key, &sealed).unwrap(), b"newest head");
+        assert!(open_message(&MessageKey::generate(), &sealed).is_err());
+        sealed[30] ^= 1;
+        assert!(open_message(&key, &sealed).is_err());
+        assert!(open_message(&key, b"short").is_err());
+    }
+
+    #[test]
+    fn the_same_message_seals_differently_every_time() {
+        let key = MessageKey::generate();
+
+        assert_ne!(seal_message(&key, b"head"), seal_message(&key, b"head"));
     }
 
     #[test]
