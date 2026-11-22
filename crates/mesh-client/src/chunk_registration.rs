@@ -1,15 +1,22 @@
-//! Registering a file's chunks with the coordinator, which repairs them
+//! Registering a file's chunks with the coordinators, which repair them
 //! while the owner's devices are off, and taking in where repair moved their
 //! pieces (`mesh_core::chunk_registry` describes the requests).
+//!
+//! Each chunk belongs to one coordinator on the coordinator list, and the
+//! list says where each is reached, so every registration and lookup goes
+//! to the coordinator responsible for that chunk.
 //!
 //! A registration names piece ids and nodes, never keys. It carries a secret
 //! derived from the chunk's key, so only the owner can change a chunk's
 //! registration later, such as to extend it after a renewal.
 
+use std::collections::BTreeMap;
+
 use mesh_core::chunk_registry::{
     CHUNKS_ROUTE, ChunkLocations, ChunkRegistration, MAX_CHUNKS_PER_REQUEST, RegisterChunks,
-    RegisterChunksResponse, RegisteredPiece, chunk_id, chunk_path,
+    RegisterChunksResponse, RegisteredPiece, chunk_id, chunk_path, responsible_coordinator,
 };
+use mesh_core::node_list::CoordinatorList;
 use reqwest::StatusCode;
 use reqwest::header::CONTENT_TYPE;
 
@@ -46,15 +53,12 @@ pub fn registration_of(chunk: &ChunkRecord, expires_at: u64) -> ChunkRegistratio
     }
 }
 
-/// Registers every chunk of `manifest` with `coordinator` until
-/// `expires_at`, and returns how many it keeps. Registering again after a
-/// renewal extends them.
-///
-/// A coordinator keeps only the chunks it is responsible for; the others
-/// belong with another coordinator.
+/// Registers every chunk of `manifest` until `expires_at`, each with the
+/// coordinator on `coordinators` responsible for it, and returns how many
+/// they keep. Registering again after a renewal extends them.
 pub async fn register(
     client: &NodeClient,
-    coordinator: &str,
+    coordinators: &CoordinatorList,
     manifest: &Manifest,
     expires_at: u64,
 ) -> Result<usize, RegisterError> {
@@ -63,18 +67,45 @@ pub async fn register(
         .iter()
         .map(|chunk| registration_of(chunk, expires_at))
         .collect();
-    send_registrations(client, coordinator, registrations).await
+    send_registrations(client, coordinators, registrations).await
 }
 
-/// Sends `registrations` to `coordinator`, as many to a request as it takes,
-/// and returns how many it keeps. Many files' chunks go out together this
-/// way, rather than in a request per file.
+/// Sends each of `registrations` to the coordinator on `coordinators`
+/// responsible for its chunk, as many to a request as it takes, and returns
+/// how many they keep. Many files' chunks go out together this way, rather
+/// than in a request per file.
 pub async fn send_registrations(
     client: &NodeClient,
-    coordinator: &str,
+    coordinators: &CoordinatorList,
     registrations: Vec<ChunkRegistration>,
 ) -> Result<usize, RegisterError> {
-    let url = format!("{}{CHUNKS_ROUTE}", coordinator.trim_end_matches('/'));
+    let mut by_coordinator: BTreeMap<&str, Vec<ChunkRegistration>> = BTreeMap::new();
+    for registration in registrations {
+        let id = chunk_id(registration.pieces.iter().map(|piece| &piece.id));
+        // An empty list has nobody to repair the chunk.
+        let Some(owner) = responsible_coordinator(&id, coordinators) else {
+            continue;
+        };
+        by_coordinator
+            .entry(&owner.url)
+            .or_default()
+            .push(registration);
+    }
+    let mut kept = 0;
+    for (url, registrations) in by_coordinator {
+        kept += send_to(client, url, registrations).await?;
+    }
+    Ok(kept)
+}
+
+/// Sends `registrations` to the coordinator at `url` and returns how many it
+/// keeps.
+async fn send_to(
+    client: &NodeClient,
+    url: &str,
+    registrations: Vec<ChunkRegistration>,
+) -> Result<usize, RegisterError> {
+    let url = format!("{}{CHUNKS_ROUTE}", url.trim_end_matches('/'));
     let mut kept = 0;
     for batch in registrations.chunks(MAX_CHUNKS_PER_REQUEST) {
         let request = RegisterChunks {
@@ -99,20 +130,24 @@ pub async fn send_registrations(
     Ok(kept)
 }
 
-/// Asks `coordinator` where each chunk of `manifest` is now and moves the
-/// pieces repair moved, and returns how many moved.
+/// Asks the coordinator on `coordinators` responsible for each chunk of
+/// `manifest` where it is now, moves the pieces repair moved, and returns
+/// how many moved.
 ///
 /// Only pieces whose id matches are moved: a coordinator can tell the client
 /// where to look, but never swap a piece for another.
 pub async fn take_new_locations(
     client: &NodeClient,
-    coordinator: &str,
+    coordinators: &CoordinatorList,
     manifest: &mut Manifest,
 ) -> Result<usize, RegisterError> {
     let mut moved = 0;
     for chunk in &mut manifest.chunks {
         let id = chunk_id(chunk.pieces.iter().map(|piece| &piece.id));
-        let url = format!("{}{}", coordinator.trim_end_matches('/'), chunk_path(&id));
+        let Some(owner) = responsible_coordinator(&id, coordinators) else {
+            continue;
+        };
+        let url = format!("{}{}", owner.url.trim_end_matches('/'), chunk_path(&id));
         let response = client.http().get(url).send().await?;
         // A chunk the coordinator doesn't keep has not been moved by it.
         if response.status() == StatusCode::NOT_FOUND {

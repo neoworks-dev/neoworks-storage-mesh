@@ -15,14 +15,16 @@
 //! version higher. Two devices adding files while apart therefore both keep
 //! their files.
 //!
-//! With a coordinator, every file and commit stored through the index is
-//! registered there for repair, and renewing registers them again until the
-//! new date. Reading the index takes in where the coordinator moved pieces
-//! and saves the files' manifests with them, so every device sees the moves.
+//! With a coordinator list, every file and commit stored through the index
+//! is registered for repair with the coordinators responsible for its
+//! chunks, and renewing registers them again until the new date. Reading the
+//! index takes in where the coordinators moved pieces and saves the files'
+//! manifests with them, so every device sees the moves.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use mesh_core::node_list::CoordinatorList;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -74,9 +76,9 @@ pub struct Session<'a> {
     pub device: String,
     /// How long commits and the pointer are stored.
     pub lease: Duration,
-    /// The coordinator that repairs the account's files and commits while
+    /// The coordinators that repair the account's files and commits while
     /// its devices are off; `None` for none.
-    pub coordinator: Option<&'a str>,
+    pub coordinators: Option<&'a CoordinatorList>,
 }
 
 impl Session<'_> {
@@ -97,7 +99,7 @@ impl Session<'_> {
             dedup_key: self.account.dedup_key(),
             device: self.device.clone(),
             lease: self.lease,
-            coordinator: self.coordinator,
+            coordinators: self.coordinators,
         }
     }
 }
@@ -166,7 +168,7 @@ impl Index {
     }
 
     /// Registers the file `name`, whose leases end at `renew_by`, for repair
-    /// with the session's coordinator, then adds or replaces it in the index
+    /// with the session's coordinators, then adds or replaces it in the index
     /// and saves the index.
     pub async fn add_file(
         &mut self,
@@ -242,8 +244,8 @@ impl Index {
     /// are. The index's commits are renewed with them; letting those expire
     /// would lose the list of files while the files themselves live on.
     ///
-    /// With a coordinator, the renewed files and commits are registered
-    /// again until the new date, so it keeps repairing them.
+    /// With coordinators, the renewed files and commits are registered again
+    /// until the new date, so they keep repairing them.
     pub async fn renew(&mut self, session: &Session<'_>) -> Result<IndexRenewal, IndexError> {
         self.renew_with_collections(session, &mut BTreeMap::new())
             .await
@@ -321,8 +323,8 @@ impl Index {
     /// Brings this device's index up to date with the account's pointer,
     /// merging when both sides saved something the other lacks.
     ///
-    /// With a coordinator, it then takes in where the coordinator moved the
-    /// files' pieces in repair and saves those manifests, so every device
+    /// With coordinators, it then takes in where they moved the files'
+    /// pieces in repair and saves those manifests, so every device
     /// finds the pieces where they are now.
     pub async fn pull(&mut self, session: &Session<'_>) -> Result<(), IndexError> {
         self.collection.pull(&session.writer()).await?;
@@ -385,13 +387,13 @@ fn is_readable(manifest: &Manifest, renewal: &BatchRenewal) -> bool {
 }
 
 /// Registers every chunk of `manifests` until `expires_at` with the
-/// session's coordinator, if it has one.
+/// session's coordinators, if it has any.
 async fn register_all<'m>(
     session: &Session<'_>,
     manifests: impl IntoIterator<Item = &'m Manifest>,
     expires_at: u64,
 ) -> Result<(), RegisterError> {
-    let Some(coordinator) = session.coordinator else {
+    let Some(coordinators) = session.coordinators else {
         return Ok(());
     };
     let registrations = manifests
@@ -399,20 +401,20 @@ async fn register_all<'m>(
         .flat_map(|manifest| &manifest.chunks)
         .map(|chunk| registration_of(chunk, expires_at))
         .collect();
-    send_registrations(session.client, coordinator, registrations).await?;
+    send_registrations(session.client, coordinators, registrations).await?;
     Ok(())
 }
 
-/// Moves the pieces of `manifest` that the session's coordinator, if it has
-/// one, moved in repair, and returns how many moved.
+/// Moves the pieces of `manifest` that the session's coordinators, if it
+/// has any, moved in repair, and returns how many moved.
 async fn take_moved_pieces(
     session: &Session<'_>,
     manifest: &mut Manifest,
 ) -> Result<usize, RegisterError> {
-    let Some(coordinator) = session.coordinator else {
+    let Some(coordinators) = session.coordinators else {
         return Ok(0);
     };
-    take_new_locations(session.client, coordinator, manifest).await
+    take_new_locations(session.client, coordinators, manifest).await
 }
 
 /// A manifest as an entry's field.

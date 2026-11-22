@@ -15,7 +15,9 @@ use mesh_client::index::{Index, Session, unix_now};
 use mesh_client::{NodeClient, NodeList, upload};
 use mesh_core::sign_in::KdfParams;
 
-use crate::{NodeListArguments, days_to_duration, download_to, load_node_list};
+use crate::{
+    NodeListArguments, days_to_duration, download_to, load_node_list, read_coordinator_list,
+};
 
 /// What every account command needs.
 #[derive(Args)]
@@ -126,6 +128,7 @@ pub async fn store(
     };
     let account = read_account(&arguments.account)?;
     let list = load_node_list(client, &arguments.nodes).await?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let lease = days_to_duration(arguments.days);
     let session = Session {
         client,
@@ -133,7 +136,7 @@ pub async fn store(
         account: &account,
         device: arguments.device.clone(),
         lease,
-        coordinator: arguments.nodes.source.coordinator.as_deref(),
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;
@@ -191,13 +194,14 @@ pub async fn fetch(
 pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> anyhow::Result<()> {
     let account = read_account(&arguments.account)?;
     let list = load_node_list(client, &arguments.nodes).await?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let session = Session {
         client,
         list: &list,
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
-        coordinator: arguments.nodes.source.coordinator.as_deref(),
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
     let renewal = index.renew(&session).await?;
@@ -224,13 +228,14 @@ async fn pulled_index(
     arguments: &AccountArguments,
 ) -> anyhow::Result<Index> {
     let account = read_account(&arguments.account)?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let session = Session {
         client,
         list,
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
-        coordinator: arguments.nodes.source.coordinator.as_deref(),
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;

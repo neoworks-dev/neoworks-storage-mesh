@@ -305,7 +305,7 @@ fn weight_of(listed: &ListedNode) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use mesh_core::node_list::{CoordinatorKey, ListedNode, NodeRecord};
+    use mesh_core::node_list::{CoordinatorKey, ListedCoordinator, ListedNode, NodeRecord};
     use mesh_core::signed::SigningKey;
 
     use super::*;
@@ -344,7 +344,10 @@ mod tests {
         let coordinator = key(10);
         let coordinators = CoordinatorList {
             version: 1,
-            keys: vec![CoordinatorKey(coordinator.verifying_key().to_bytes())],
+            coordinators: vec![ListedCoordinator {
+                key: CoordinatorKey(coordinator.verifying_key().to_bytes()),
+                url: "https://coordinator.example.org".into(),
+            }],
         };
         let snapshot = NodeSnapshot {
             published_at: 1,
@@ -381,7 +384,10 @@ mod tests {
         let coordinator = key(10);
         let coordinators = CoordinatorList {
             version: 1,
-            keys: vec![CoordinatorKey(coordinator.verifying_key().to_bytes())],
+            coordinators: vec![ListedCoordinator {
+                key: CoordinatorKey(coordinator.verifying_key().to_bytes()),
+                url: "https://coordinator.example.org".into(),
+            }],
         };
         let mut placed = listed(&key(1), &key(1), 1000);
         placed.operator_id = Some("3f2a".into());

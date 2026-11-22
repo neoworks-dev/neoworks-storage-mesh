@@ -14,10 +14,10 @@
 //! the nodes are now in the list. Instead of `--nodes`, every command takes
 //! `--coordinator http://… --coordinators coordinators.json` to fetch the
 //! signed node list, where `coordinators.json` holds the coordinator list
-//! whose keys it must be signed with:
+//! whose keys it must be signed with, and where each coordinator is reached:
 //!
 //! ```json
-//! { "version": 1, "keys": ["5c0f…"] }
+//! { "version": 1, "coordinators": [{ "key": "5c0f…", "url": "https://…" }] }
 //! ```
 //!
 //! The newest node list accepted from a coordinator is kept in
@@ -29,10 +29,11 @@
 //! on first use; until there are accounts, that file is what makes the same
 //! chunk encrypt the same way every time.
 //!
-//! With a coordinator, `put`, `renew` and `repair` register the file's chunks
-//! there, by piece ids and nodes and without keys, so the coordinator repairs
-//! them while this device is off. Every command that reads a manifest first
-//! takes in where the coordinator moved pieces since, and saves it. `store`
+//! With a coordinator list, `put`, `renew` and `repair` register each of the
+//! file's chunks with the coordinator responsible for it, by piece ids and
+//! nodes and without keys, so the coordinators repair them while this device
+//! is off. Every command that reads a manifest first takes in where the
+//! coordinators moved pieces since, and saves it. `store`
 //! and `renew-all` do the same for the account's files and the index's own
 //! commits, and reading the index takes in the moves.
 
@@ -252,14 +253,11 @@ async fn load_node_list(
         return NodeList::read(path).with_context(|| format!("reading {}", path.display()));
     }
     // clap requires either `--nodes` or both of these.
-    let (Some(coordinator), Some(coordinators_path)) = (&source.coordinator, &source.coordinators)
+    let (Some(coordinator), Some(coordinators)) =
+        (&source.coordinator, read_coordinator_list(arguments)?)
     else {
         anyhow::bail!("give --nodes, or --coordinator with --coordinators");
     };
-    let json = std::fs::read(coordinators_path)
-        .with_context(|| format!("reading {}", coordinators_path.display()))?;
-    let coordinators: CoordinatorList = serde_json::from_slice(&json)
-        .with_context(|| format!("parsing {}", coordinators_path.display()))?;
     let kept_path = &arguments.kept_node_list;
     let fetched = NodeList::fetch_keeping_newest(client, coordinator, &coordinators, kept_path)
         .await
@@ -304,41 +302,52 @@ async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()
     register_for_repair(client, &arguments.nodes, &manifest, lease).await
 }
 
+/// The coordinator list in the file `--coordinators` names, if it names one.
+fn read_coordinator_list(arguments: &NodeListArguments) -> anyhow::Result<Option<CoordinatorList>> {
+    let Some(path) = &arguments.source.coordinators else {
+        return Ok(None);
+    };
+    let json = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let coordinators =
+        serde_json::from_slice(&json).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(coordinators))
+}
+
 /// Registers `manifest` for repair until `lease` from now with the
-/// coordinator `nodes` names, if it names one.
+/// coordinators on the list `nodes` names, if it names one.
 async fn register_for_repair(
     client: &NodeClient,
     nodes: &NodeListArguments,
     manifest: &Manifest,
     lease: Duration,
 ) -> anyhow::Result<()> {
-    let Some(coordinator) = &nodes.source.coordinator else {
+    let Some(coordinators) = read_coordinator_list(nodes)? else {
         return Ok(());
     };
     let expires_at = unix_now() + lease.as_secs();
-    let kept = register(client, coordinator, manifest, expires_at)
+    let kept = register(client, &coordinators, manifest, expires_at)
         .await
         .context("registering the chunks for repair")?;
     println!(
-        "{coordinator} repairs {kept} of {} chunks",
+        "the coordinators repair {kept} of {} chunks",
         manifest.chunks.len()
     );
     Ok(())
 }
 
-/// The manifest in `path`, with the pieces that the coordinator `nodes`
-/// names, if it names one, moved in repair since; saved again when any
-/// moved.
+/// The manifest in `path`, with the pieces that the coordinators on the list
+/// `nodes` names, if it names one, moved in repair since; saved again when
+/// any moved.
 async fn read_current_manifest(
     client: &NodeClient,
     path: &Path,
     nodes: &NodeListArguments,
 ) -> anyhow::Result<Manifest> {
     let mut manifest = read_manifest(path)?;
-    let Some(coordinator) = &nodes.source.coordinator else {
+    let Some(coordinators) = read_coordinator_list(nodes)? else {
         return Ok(manifest);
     };
-    let moved = take_new_locations(client, coordinator, &mut manifest)
+    let moved = take_new_locations(client, &coordinators, &mut manifest)
         .await
         .context("asking where repair moved pieces")?;
     if moved > 0 {
