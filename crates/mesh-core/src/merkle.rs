@@ -54,7 +54,7 @@ pub struct SegmentProof {
 /// counts as one empty segment, so every piece has a tree.
 pub fn segment_count(piece_len: usize) -> u32 {
     let count = piece_len.div_ceil(SEGMENT_BYTES).max(1);
-    // Pieces are at most `MAX_PIECE_BYTES`, so they have at most 1024 segments.
+    // Pieces are at most `MAX_PIECE_BYTES`, so they have at most 2304 segments.
     u32::try_from(count).expect("a piece has far fewer than 2^32 segments")
 }
 

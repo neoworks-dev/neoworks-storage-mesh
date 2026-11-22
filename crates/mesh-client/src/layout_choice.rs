@@ -72,6 +72,11 @@ pub fn choose_layout(
             let Ok(layout) = Layout::new(data, parity) else {
                 continue;
             };
+            // Fewer pieces than regions can't fill them all, however they
+            // are placed; the placement limits only cap pieces per region.
+            if layout.total() < worth.min_regions {
+                continue;
+            }
             let loss = loss_per_year(layout, daily_loss);
             if loss > worth.max_loss_per_year {
                 continue;
@@ -175,6 +180,24 @@ mod tests {
         let choice = choose_layout(&worth(1e-6, 2, 1), &list, Some(1_000)).unwrap();
 
         assert_eq!(choice.spread.layout.data(), 2);
+    }
+
+    #[test]
+    fn reading_from_one_node_keeps_whole_copies() {
+        let list = network(200, 10);
+
+        let choice = choose_layout(&worth(1e-6, 1, 1), &list, Some(1_000)).unwrap();
+
+        assert_eq!(choice.spread.layout.data(), 1);
+    }
+
+    #[test]
+    fn copies_never_count_as_spread_over_more_regions_than_they_are() {
+        let list = network(200, 10);
+
+        let choice = choose_layout(&worth(1e-2, 1, 3), &list, Some(1_000)).unwrap();
+
+        assert!(choice.spread.layout.total() >= 3);
     }
 
     #[test]

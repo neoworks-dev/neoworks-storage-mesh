@@ -16,7 +16,7 @@ use crate::node_latency::LatencyTable;
 use crate::node_list::NodeList;
 
 /// How many chunks a download fetches at once. More chunks use more nodes at
-/// the same time; each one in flight holds up to 4 MiB of pieces and its
+/// the same time; each one in flight holds up to 8 MiB of pieces and its
 /// opened bytes, so four keep a download within a few dozen MiB.
 pub const CHUNKS_IN_FLIGHT: usize = 4;
 

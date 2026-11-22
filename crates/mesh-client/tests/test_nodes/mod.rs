@@ -81,14 +81,16 @@ impl TestNode {
 }
 
 /// The URL of a node that accepts connections and never answers, like one
-/// behind a congested link. It runs until the test ends.
-pub async fn start_silent_node() -> String {
+/// behind a congested link, counting the connections it accepted in
+/// `accepted`. It runs until the test ends.
+pub async fn start_silent_node(accepted: Arc<AtomicUsize>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
         // Holding the sockets keeps the connections open without a reply.
         let mut connections = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
+            accepted.fetch_add(1, Ordering::SeqCst);
             connections.push(socket);
         }
     });

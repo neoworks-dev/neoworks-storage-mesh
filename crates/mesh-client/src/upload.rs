@@ -11,7 +11,7 @@ use mesh_core::layout::{MAX_PIECES, MIN_DATA_PIECES};
 use mesh_core::protocol::MAX_PIECE_BYTES;
 use tokio::io::AsyncRead;
 
-use crate::chunking::{MAX_CHUNK_BYTES, chunker};
+use crate::chunking::{FileStart, MAX_CHUNK_BYTES, chunker, read_start};
 use crate::encryption::{ChunkKey, DedupKey, SEAL_OVERHEAD, seal};
 use crate::erasure::cut;
 use crate::manifest::{ChunkRecord, Manifest};
@@ -85,36 +85,68 @@ pub async fn upload_spread(
     reader: impl AsyncRead + Unpin,
     earlier: &[Manifest],
 ) -> Result<Manifest, UploadError> {
-    let Stored {
-        client,
-        list,
-        lease,
-        ..
-    } = *stored;
-    let mut known: HashMap<ChunkKey, ChunkRecord> = earlier
-        .iter()
-        .flat_map(|manifest| &manifest.chunks)
-        .map(|chunk| (chunk.key.clone(), chunk.clone()))
-        .collect();
-    let mut chunks = Vec::new();
-    let mut size = 0;
-    let mut chunker = chunker(reader);
+    let mut file = FileInProgress {
+        stored,
+        dedup_key,
+        known: earlier
+            .iter()
+            .flat_map(|manifest| &manifest.chunks)
+            .map(|chunk| (chunk.key.clone(), chunk.clone()))
+            .collect(),
+        manifest: Manifest {
+            size: 0,
+            chunks: Vec::new(),
+        },
+    };
+    let mut reader = reader;
+    let start = match read_start(&mut reader).await? {
+        FileStart::Whole(bytes) if bytes.is_empty() => return Ok(file.manifest),
+        FileStart::Whole(bytes) => {
+            file.add(bytes).await?;
+            return Ok(file.manifest);
+        }
+        FileStart::Larger(start) => start,
+    };
+    let mut chunker = chunker(start, reader);
     let mut file_chunks = pin!(chunker.as_stream());
     while let Some(chunk) = file_chunks.next().await {
-        let plaintext = chunk.map_err(std::io::Error::from)?.data;
-        // Chunks are at least 256 KiB except the last, so a u32 index covers
-        // files up to a petabyte.
-        let index = u32::try_from(chunks.len()).expect("files stay below a petabyte");
-        let key = dedup_key.chunk_key(&plaintext);
-        let record = match known.get(&key) {
-            Some(record) if renew_all(client, list, record, lease).await => record.clone(),
-            _ => store_chunk(stored, key, index, &plaintext).await?,
-        };
-        known.insert(record.key.clone(), record.clone());
-        chunks.push(record);
-        size += plaintext.len() as u64;
+        file.add(chunk.map_err(std::io::Error::from)?.data).await?;
     }
-    Ok(Manifest { size, chunks })
+    Ok(file.manifest)
+}
+
+/// A file being stored: the chunks stored so far, and every chunk that can
+/// be reused instead of stored again.
+struct FileInProgress<'a, 'b> {
+    stored: &'a Stored<'b>,
+    dedup_key: &'a DedupKey,
+    known: HashMap<ChunkKey, ChunkRecord>,
+    manifest: Manifest,
+}
+
+impl FileInProgress<'_, '_> {
+    /// Stores the next chunk of the file, or renews it when it is known.
+    async fn add(&mut self, plaintext: Vec<u8>) -> Result<(), UploadError> {
+        let Stored {
+            client,
+            list,
+            lease,
+            ..
+        } = *self.stored;
+        // Chunks are at least 1 MiB except the last, so a u32 index covers
+        // files up to four petabytes.
+        let index =
+            u32::try_from(self.manifest.chunks.len()).expect("files stay below four petabytes");
+        let key = self.dedup_key.chunk_key(&plaintext);
+        let record = match self.known.get(&key) {
+            Some(record) if renew_all(client, list, record, lease).await => record.clone(),
+            _ => store_chunk(self.stored, key, index, &plaintext).await?,
+        };
+        self.known.insert(record.key.clone(), record.clone());
+        self.manifest.chunks.push(record);
+        self.manifest.size += plaintext.len() as u64;
+        Ok(())
+    }
 }
 
 /// Seals chunk `index` under `key`, cuts it in the layout `stored` asks for
@@ -127,8 +159,8 @@ async fn store_chunk(
 ) -> Result<ChunkRecord, UploadError> {
     let layout = stored.spread.layout;
     let sealed = seal(&key, plaintext);
-    let plain_len = u32::try_from(plaintext.len()).expect("a chunk is at most 4 MiB");
-    let sealed_len = u32::try_from(sealed.len()).expect("a sealed chunk is at most 4 MiB");
+    let plain_len = u32::try_from(plaintext.len()).expect("a chunk is at most 8 MiB");
+    let sealed_len = u32::try_from(sealed.len()).expect("a sealed chunk is just over 8 MiB");
     let placed = store_pieces(
         stored.client,
         stored.list,

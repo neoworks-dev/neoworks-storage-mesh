@@ -6,6 +6,7 @@ mod test_nodes;
 
 use std::time::Duration;
 
+use mesh_client::chunking::WHOLE_FILE_MAX_BYTES;
 use mesh_client::layout_choice::{Worth, choose_layout};
 use mesh_client::placement::Spread;
 use mesh_client::{
@@ -44,6 +45,24 @@ fn spread_of(data: usize, parity: usize) -> Spread {
         layout: Layout::new(data, parity).unwrap(),
         regions: 1,
     }
+}
+
+#[tokio::test]
+async fn the_largest_whole_file_is_kept_as_two_copies() {
+    let nodes = start_nodes(2).await;
+    let list = node_list(&nodes);
+    let file = random_file(WHOLE_FILE_MAX_BYTES, 10);
+
+    // One data piece is the whole sealed chunk, which nodes must accept.
+    let manifest = store_spread(&list, &file, spread_of(1, 1)).await;
+    nodes[0].stop();
+
+    assert_eq!(manifest.chunks.len(), 1);
+    let client = NodeClient::new().unwrap();
+    assert_eq!(
+        download_bytes(&client, &list, &manifest).await.unwrap(),
+        file
+    );
 }
 
 #[tokio::test]
@@ -119,15 +138,22 @@ async fn no_region_holds_more_pieces_than_a_chunk_can_lose() {
 async fn repair_rebuilds_pieces_in_the_chunks_own_layout() {
     let nodes = start_nodes(6).await;
     let list = node_list(&nodes);
+    // Small enough to be one chunk, so one node holding a piece of it
+    // holds a piece of every chunk.
     let file = random_file(1_500_000, 14);
     let mut manifest = store_spread(&list, &file, spread_of(3, 2)).await;
+    assert_eq!(manifest.chunks.len(), 1);
+    let failing = nodes
+        .iter()
+        .find(|node| node.id == manifest.chunks[0].pieces[0].node)
+        .unwrap();
     let lost: Vec<usize> = manifest
         .chunks
         .iter()
-        .map(|chunk| position_on(chunk, &nodes[0].id))
+        .map(|chunk| position_on(chunk, &failing.id))
         .collect();
 
-    nodes[0].lose_all_pieces();
+    failing.lose_all_pieces();
     let client = NodeClient::new().unwrap();
     let report = audit(&client, &list, &manifest, AUDIT_DEADLINE).await;
     let outcome = repair(&client, &mut manifest, &report, &list, LEASE).await;
@@ -140,7 +166,7 @@ async fn repair_rebuilds_pieces_in_the_chunks_own_layout() {
     );
     // Five pieces on six nodes: the lost piece goes to the one node left.
     for (chunk, position) in manifest.chunks.iter().zip(lost) {
-        assert_ne!(chunk.pieces[position].node, nodes[0].id);
+        assert_ne!(chunk.pieces[position].node, failing.id);
     }
     assert_eq!(
         download_bytes(&client, &list, &manifest).await.unwrap(),

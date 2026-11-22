@@ -9,13 +9,15 @@ mod test_nodes;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use mesh_client::chunking::{AVERAGE_CHUNK_BYTES, MAX_CHUNK_BYTES, MIN_CHUNK_BYTES};
 use mesh_client::erasure::{DATA_PIECES, RebuildError};
 use mesh_client::{
-    DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList, UploadError, upload,
+    CHUNKS_IN_FLIGHT, DedupKey, DownloadError, Manifest, NodeClient, NodeInfo, NodeList,
+    UploadError, upload,
 };
 use mesh_core::NodeId;
 use mesh_node::NodeSettings;
@@ -202,9 +204,11 @@ async fn nodes_missing_from_the_list_count_as_down() {
 #[tokio::test]
 async fn a_node_that_never_answers_is_passed_over_and_remembered() {
     let nodes = start_nodes(NodeSettings::default()).await;
-    let file = random_file(AVERAGE_CHUNK_BYTES * 6, 2);
+    // No chunk is larger than `MAX_CHUNK_BYTES`, so this is more chunks than
+    // a download fetches at once.
+    let file = random_file(MAX_CHUNK_BYTES * CHUNKS_IN_FLIGHT + 1, 2);
     let mut manifest = store(&nodes, &file).await.unwrap();
-    assert!(manifest.chunks.len() >= 3);
+    assert!(manifest.chunks.len() > CHUNKS_IN_FLIGHT);
     // Decoding and decrypting take seconds in a debug build, so the time of
     // a read from healthy nodes is the baseline.
     let started = Instant::now();
@@ -212,9 +216,10 @@ async fn a_node_that_never_answers_is_passed_over_and_remembered() {
     let healthy = started.elapsed();
     // Piece 0 is a data piece, so an unmeasured client asks for it first.
     let mut list = node_list(&nodes);
+    let asked = Arc::new(AtomicUsize::new(0));
     let silent = NodeInfo {
         id: NodeId::of(&[9; 32]),
-        url: start_silent_node().await,
+        url: start_silent_node(asked.clone()).await,
         operator: "silent".into(),
         network: "silent".into(),
         region: None,
@@ -230,12 +235,22 @@ async fn a_node_that_never_answers_is_passed_over_and_remembered() {
     let with_silent = started.elapsed();
 
     assert_eq!(read, file);
-    // Waiting for the silent node would take the 30-second request timeout
-    // per chunk, and hedging without remembering one second per chunk.
-    // Remembering waits one second for the first chunk only, after which the
-    // node ranks last and later chunks do not ask it.
+    // The chunks fetched at once all ask the unmeasured node before any
+    // learns it is silent. Once the first of them finishes, the node is
+    // recorded with the time it was waited on and ranks behind faster nodes,
+    // so later chunks mostly do not ask it. Under load a healthy node can be
+    // slower than that record, which is why this allows a few more.
+    let asked = asked.load(Ordering::SeqCst);
     assert!(
-        with_silent < healthy + Duration::from_secs(2),
+        asked < manifest.chunks.len(),
+        "{asked} of {} chunks asked the silent node",
+        manifest.chunks.len()
+    );
+    // Hedging moves on after a second instead of the 30-second request
+    // timeout. Rebuilding from a parity piece instead of the silent node's
+    // data piece costs a few seconds more in a debug build.
+    assert!(
+        with_silent < healthy + Duration::from_secs(15),
         "healthy {healthy:?}, with a silent node {with_silent:?}"
     );
 }

@@ -13,12 +13,10 @@ use serde::{Deserialize, Serialize};
 /// read and renewal, and few networks have more independent nodes per chunk.
 pub const MAX_PIECES: usize = 32;
 
-/// The fewest data pieces a chunk is cut into.
-///
-/// A piece of a chunk with one data piece is the whole sealed chunk, and the
-/// largest chunk (4 MiB) sealed is just over the 4 MiB nodes accept per piece.
-/// Two data pieces keep every piece at about half of that.
-pub const MIN_DATA_PIECES: usize = 2;
+/// The fewest data pieces a chunk is cut into. With one, every piece is a
+/// whole copy of the sealed chunk, which nodes accept since the largest
+/// chunk sealed stays below their piece limit.
+pub const MIN_DATA_PIECES: usize = 1;
 
 /// A chunk's data and parity piece counts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,7 +28,7 @@ pub struct Layout {
 /// A layout outside what the mesh supports.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LayoutError {
-    #[error("a chunk has at least {MIN_DATA_PIECES} data pieces")]
+    #[error("a chunk has at least one data piece")]
     TooFewData,
     #[error("a chunk has at most {MAX_PIECES} pieces")]
     TooManyPieces,
@@ -136,7 +134,8 @@ mod tests {
     #[test]
     fn layouts_are_checked() {
         assert_eq!(Layout::new(4, 2), Ok(Layout::DEFAULT));
-        assert_eq!(Layout::new(1, 1), Err(LayoutError::TooFewData));
+        assert!(Layout::new(1, 1).is_ok());
+        assert_eq!(Layout::new(0, 2), Err(LayoutError::TooFewData));
         assert_eq!(Layout::new(16, 17), Err(LayoutError::TooManyPieces));
     }
 

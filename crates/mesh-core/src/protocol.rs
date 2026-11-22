@@ -80,7 +80,12 @@ pub struct ChallengeResponse {
 /// The largest piece a node accepts. Clients cut data so that every piece
 /// stays below it; nodes use it to refuse oversized uploads before reading
 /// them.
-pub const MAX_PIECE_BYTES: usize = 4 * 1024 * 1024;
+///
+/// It is just above the largest chunk (8 MiB), so a chunk of one data piece
+/// fits whole once sealed: kept as plain copies, like 1 + 1, a read needs
+/// only one node. A node whose link is too slow to send this much in a few
+/// seconds is not worth adding to the mesh.
+pub const MAX_PIECE_BYTES: usize = 9 * 1024 * 1024;
 
 /// The query of a store or renew request: how long the piece should be kept
 /// from now.
