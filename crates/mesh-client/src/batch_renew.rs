@@ -12,9 +12,10 @@ use std::time::Duration;
 use futures::future::join_all;
 use mesh_core::PieceId;
 use mesh_core::protocol::MAX_BATCH_PIECES;
+use reqwest::StatusCode;
 
 use crate::manifest::PlacedPiece;
-use crate::node_client::NodeClient;
+use crate::node_client::{NodeClient, NodeRequestError};
 
 /// What a batch renewal achieved.
 #[derive(Debug, Default)]
@@ -24,6 +25,10 @@ pub struct BatchRenewal {
     /// Pieces whose node did not hold them, refused or could not be reached,
     /// by node URL.
     pub not_renewed: BTreeSet<(String, PieceId)>,
+    /// The nodes that answered `402 Payment Required`: they renew only by
+    /// moving pieces into a tab ([`crate::tab_renewal`]). Their pieces are
+    /// in `not_renewed`.
+    pub requires_tokens: BTreeSet<String>,
 }
 
 impl BatchRenewal {
@@ -46,14 +51,18 @@ pub async fn renew_pieces<'piece>(
     }
     let renewals = by_node.into_iter().map(|(node, ids)| async move {
         let ids: Vec<PieceId> = ids.into_iter().collect();
-        let mut answers = Vec::with_capacity(ids.len());
-        for batch in ids.chunks(MAX_BATCH_PIECES) {
-            answers.extend(renew_batch(client, node, batch, lease).await);
-        }
-        (node, ids, answers)
+        let answer = renew_on_node(client, node, &ids, lease).await;
+        (node, ids, answer)
     });
     let mut renewal = BatchRenewal::default();
-    for (node, ids, answers) in join_all(renewals).await {
+    for (node, ids, answer) in join_all(renewals).await {
+        let answers = match answer {
+            NodeAnswer::Renewed(answers) => answers,
+            NodeAnswer::RequiresTokens => {
+                renewal.requires_tokens.insert(node.to_string());
+                vec![false; ids.len()]
+            }
+        };
         for (id, renewed) in ids.into_iter().zip(answers) {
             let key = (node.to_string(), id);
             if renewed {
@@ -66,18 +75,35 @@ pub async fn renew_pieces<'piece>(
     renewal
 }
 
-/// Renews one batch on `node`; for each piece, whether it was renewed.
-async fn renew_batch(
+/// How a node answered a renewal.
+enum NodeAnswer {
+    /// For each piece, whether it was renewed.
+    Renewed(Vec<bool>),
+    /// The node renews only through tabs.
+    RequiresTokens,
+}
+
+/// Renews `ids` on `node` in batches of [`MAX_BATCH_PIECES`].
+async fn renew_on_node(
     client: &NodeClient,
     node: &str,
     ids: &[PieceId],
     lease: Duration,
-) -> Vec<bool> {
-    match client.renew_many(node, ids, lease).await {
-        Ok(lease_ends) => lease_ends.iter().map(Option::is_some).collect(),
-        Err(error) => {
-            eprintln!("{error}");
-            vec![false; ids.len()]
+) -> NodeAnswer {
+    let mut answers = Vec::with_capacity(ids.len());
+    for batch in ids.chunks(MAX_BATCH_PIECES) {
+        match client.renew_many(node, batch, lease).await {
+            Ok(lease_ends) => answers.extend(lease_ends.iter().map(Option::is_some)),
+            Err(NodeRequestError::Refused { status, .. })
+                if status == StatusCode::PAYMENT_REQUIRED =>
+            {
+                return NodeAnswer::RequiresTokens;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                answers.extend(vec![false; batch.len()]);
+            }
         }
     }
+    NodeAnswer::Renewed(answers)
 }
