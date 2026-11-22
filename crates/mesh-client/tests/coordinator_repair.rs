@@ -1,7 +1,8 @@
 //! The coordinator repairing registered chunks while the owner's device is
 //! off: at once when a chunk has no spare piece left, not before the delay
 //! while it has one, paying nodes that require tokens, and only for the
-//! chunks it is responsible for.
+//! chunks it is responsible for; and an account's index registering its
+//! files and commits and taking in where the coordinator moved them.
 
 mod test_nodes;
 
@@ -9,13 +10,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mesh_client::account::Account;
 use mesh_client::chunk_registration::{register, registration_of, take_new_locations};
+use mesh_client::commits::read_head;
+use mesh_client::index::{Index, Session};
 use mesh_client::sign_in::{auth_key, sign_up};
 use mesh_client::tabs::open_tabs;
 use mesh_client::tokens::get_tokens;
-use mesh_client::{Manifest, NodeClient, NodeList};
+use mesh_client::{Manifest, NodeClient, NodeList, upload};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
+use mesh_core::NodeId;
 use mesh_core::chunk_registry::{
-    CHUNKS_ROUTE, RegisterChunks, RegisterChunksResponse, chunk_id, responsible_coordinator,
+    CHUNKS_ROUTE, RegisterChunks, RegisterChunksResponse, chunk_id, chunk_path,
+    responsible_coordinator,
 };
 use mesh_core::node_list::{CoordinatorKey, CoordinatorList};
 use mesh_core::sign_in::KdfParams;
@@ -342,4 +347,162 @@ async fn a_coordinator_keeps_only_the_chunks_it_is_responsible_for() {
         })
         .collect();
     assert_eq!(answer.accepted, expected);
+}
+
+/// An index session of `account` on `list`, registering with `coordinator`
+/// if given.
+fn session<'a>(
+    client: &'a NodeClient,
+    list: &'a NodeList,
+    account: &'a Account,
+    coordinator: Option<&'a str>,
+) -> Session<'a> {
+    Session {
+        client,
+        list,
+        account,
+        device: "laptop".into(),
+        lease: LEASE,
+        coordinator,
+    }
+}
+
+/// Uploads `file` under the session's account and adds it to `index` as
+/// `name`.
+async fn store_in_index(index: &mut Index, session: &Session<'_>, name: &str, file: &[u8]) {
+    let manifest = upload(
+        session.client,
+        session.list,
+        &session.account.dedup_key(),
+        file,
+        LEASE,
+        &[],
+    )
+    .await
+    .unwrap();
+    index
+        .add_file(session, name, &manifest, now() + LEASE.as_secs())
+        .await
+        .unwrap();
+}
+
+/// The manifest of the commit the account's pointer names.
+async fn head_commit(client: &NodeClient, list: &NodeList, account: &Account) -> Manifest {
+    let owner = account.pointer_key().verifying_key().to_bytes();
+    let (head, _) = read_head(client, list, &owner, &account.message_key(), None)
+        .await
+        .unwrap();
+    head.manifest
+}
+
+/// Whether `coordinator` keeps every chunk of `manifest`.
+async fn all_registered(coordinator: &str, manifest: &Manifest) -> bool {
+    for chunk in &manifest.chunks {
+        let id = chunk_id(chunk.pieces.iter().map(|piece| &piece.id));
+        let response = reqwest::get(format!("{coordinator}{}", chunk_path(&id)))
+            .await
+            .unwrap();
+        if !response.status().is_success() {
+            return false;
+        }
+    }
+    true
+}
+
+#[tokio::test]
+async fn files_and_commits_stored_through_the_index_are_registered() {
+    let hour = Duration::from_secs(60 * 60);
+    let (_data, coordinator, coordinators) = start_coordinator(hour, None).await;
+    let (_nodes, list) =
+        start_registered_nodes(&coordinator, &coordinators, 6, NodeSettings::default()).await;
+    let client = NodeClient::new().unwrap();
+    let account = Account::generate();
+    let session = session(&client, &list, &account, Some(&coordinator));
+    let mut index = Index::default();
+
+    store_in_index(&mut index, &session, "notes.txt", &random_file(300_000, 25)).await;
+
+    let file = index.file("notes.txt").unwrap().unwrap();
+    assert!(all_registered(&coordinator, &file.manifest).await);
+    let commit = head_commit(&client, &list, &account).await;
+    assert!(all_registered(&coordinator, &commit).await);
+}
+
+#[tokio::test]
+async fn renewing_the_index_registers_what_was_stored_without_a_coordinator() {
+    let hour = Duration::from_secs(60 * 60);
+    let (_data, coordinator, coordinators) = start_coordinator(hour, None).await;
+    let (_nodes, list) =
+        start_registered_nodes(&coordinator, &coordinators, 6, NodeSettings::default()).await;
+    let client = NodeClient::new().unwrap();
+    let account = Account::generate();
+    let mut index = Index::default();
+    let without = session(&client, &list, &account, None);
+    store_in_index(&mut index, &without, "notes.txt", &random_file(300_000, 26)).await;
+    let file = index.file("notes.txt").unwrap().unwrap();
+    assert!(!all_registered(&coordinator, &file.manifest).await);
+    let first_commit = head_commit(&client, &list, &account).await;
+
+    index
+        .renew(&session(&client, &list, &account, Some(&coordinator)))
+        .await
+        .unwrap();
+
+    assert!(all_registered(&coordinator, &file.manifest).await);
+    assert!(all_registered(&coordinator, &first_commit).await);
+    let renewal_commit = head_commit(&client, &list, &account).await;
+    assert!(all_registered(&coordinator, &renewal_commit).await);
+}
+
+#[tokio::test]
+async fn reading_the_index_takes_in_pieces_the_coordinator_moved() {
+    let (_data, coordinator, coordinators) = start_coordinator(Duration::ZERO, None).await;
+    let (nodes, list) =
+        start_registered_nodes(&coordinator, &coordinators, 8, NodeSettings::default()).await;
+    let client = NodeClient::new().unwrap();
+    let account = Account::generate();
+    let mut laptop = Index::default();
+    let laptop_session = session(&client, &list, &account, Some(&coordinator));
+    store_in_index(
+        &mut laptop,
+        &laptop_session,
+        "notes.txt",
+        &random_file(200_000, 27),
+    )
+    .await;
+    let mut stored = laptop.file("notes.txt").unwrap().unwrap().manifest;
+    let holder = nodes
+        .iter()
+        .find(|node| stored.chunks[0].pieces[0].node == node.id)
+        .unwrap();
+    holder.stop();
+    wait_for_repair(&coordinator, &mut stored, &[holder]).await;
+    let list = list_where(&coordinator, &coordinators, |list| list.nodes.len() == 7).await;
+
+    let mut phone = Index::default();
+    phone
+        .pull(&session(&client, &list, &account, Some(&coordinator)))
+        .await
+        .unwrap();
+
+    let on_phone = phone.file("notes.txt").unwrap().unwrap().manifest;
+    assert_eq!(nodes_of(&on_phone), nodes_of(&stored));
+    // The phone saved the move, so a device without the coordinator sees it.
+    let mut tablet = Index::default();
+    tablet
+        .pull(&session(&client, &list, &account, None))
+        .await
+        .unwrap();
+    let on_tablet = tablet.file("notes.txt").unwrap().unwrap().manifest;
+    assert_eq!(nodes_of(&on_tablet), nodes_of(&stored));
+}
+
+/// The node of every piece of `manifest`, chunk by chunk.
+fn nodes_of(manifest: &Manifest) -> Vec<NodeId> {
+    manifest
+        .chunks
+        .iter()
+        .flat_map(|chunk| &chunk.pieces)
+        .map(|piece| piece.node)
+        .collect()
 }

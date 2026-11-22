@@ -28,7 +28,9 @@
 //! With a coordinator, `put`, `renew` and `repair` register the file's chunks
 //! there, by piece ids and nodes and without keys, so the coordinator repairs
 //! them while this device is off. Every command that reads a manifest first
-//! takes in where the coordinator moved pieces since, and saves it.
+//! takes in where the coordinator moved pieces since, and saves it. `store`
+//! and `renew-all` do the same for the account's files and the index's own
+//! commits, and reading the index takes in the moves.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
