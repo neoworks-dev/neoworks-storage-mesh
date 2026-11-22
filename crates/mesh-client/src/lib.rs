@@ -18,6 +18,10 @@
 //! [`renew`] to keep it stored, [`audit`] to check that the nodes still hold
 //! it, and [`repair`] to replace the pieces they lost. A file nobody renews
 //! expires.
+//!
+//! A signed pointer ([`pointers`]) is the one place whose address does not
+//! change: it sits on nodes picked from the owner's key and says where the
+//! newest version of something is.
 
 mod audit;
 pub mod chunking;
@@ -29,6 +33,7 @@ mod node_client;
 mod node_latency;
 mod node_list;
 pub mod placement;
+pub mod pointers;
 mod random;
 mod renew;
 mod repair;
@@ -38,7 +43,7 @@ pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHe
 pub use download::{DownloadError, download};
 pub use encryption::DedupKey;
 pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
-pub use node_client::{NodeClient, NodeRequestError};
+pub use node_client::{NodeClient, NodeRequestError, PointerStored};
 pub use node_list::{NodeInfo, NodeList, NodeListError};
 pub use renew::{RenewReport, renew};
 pub use repair::{ChunkRepair, REPAIR_AT, RepairReport, repair};

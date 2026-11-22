@@ -1,16 +1,18 @@
 //! Requests from the device to nodes.
 //!
 //! Nodes are not trusted, so every piece that comes back is hashed and
-//! compared with the id it was asked for.
+//! compared with the id it was asked for, and every pointer is checked for
+//! its owner's signature.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use mesh_core::PieceId;
 use mesh_core::merkle::SegmentProof;
+use mesh_core::pointer::Pointer;
 use mesh_core::protocol::{
     ChallengeRequest, ChallengeResponse, IDENTITY_ROUTE, LeaseResponse, NodeIdentity,
-    challenge_path, lease_path, piece_path,
+    PointerConflict, challenge_path, lease_path, piece_path, pointer_path,
 };
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
@@ -51,6 +53,18 @@ pub enum NodeRequestError {
     UnexpectedAnswer { node: String },
     #[error("node {node} claims an id that is not the hash of its key")]
     InconsistentIdentity { node: String },
+    #[error("node {node} returned a pointer its owner did not sign")]
+    ForgedPointer { node: String },
+}
+
+/// What a node did with a pointer it was handed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PointerStored {
+    /// The node holds it until `expires_at`, in Unix seconds on its clock.
+    Stored { expires_at: u64 },
+    /// The node holds a record it keeps instead: a higher version, or another
+    /// record under the same version.
+    Refused { held_version: u64 },
 }
 
 impl NodeClient {
@@ -84,6 +98,67 @@ impl NodeClient {
             http,
             latencies: Arc::default(),
         })
+    }
+
+    /// Stores `pointer` on `node` for `lease`.
+    pub async fn put_pointer(
+        &self,
+        node: &str,
+        pointer: &Pointer,
+        lease: Duration,
+    ) -> Result<PointerStored, NodeRequestError> {
+        let url = with_lease(node_url(node, &pointer_path(&pointer.owner)), lease);
+        // A pointer is plain integers and bytes, which always serialize.
+        let body = serde_json::to_vec(pointer).expect("a pointer serializes");
+        let response = self
+            .http
+            .put(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if response.status() == StatusCode::CONFLICT {
+            let conflict: PointerConflict = read_json(node, response).await?;
+            return Ok(PointerStored::Refused {
+                held_version: conflict.held_version,
+            });
+        }
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let expires_at = read_lease_end(node, response).await?;
+        Ok(PointerStored::Stored { expires_at })
+    }
+
+    /// The pointer `node` holds for `owner`, once its signature holds, or
+    /// `None` when the node holds none.
+    pub async fn get_pointer(
+        &self,
+        node: &str,
+        owner: &[u8; 32],
+    ) -> Result<Option<Pointer>, NodeRequestError> {
+        let response = self
+            .http
+            .get(node_url(node, &pointer_path(owner)))
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let pointer: Pointer = read_json(node, response).await?;
+        // A node could hand back another owner's record, or one it made up;
+        // only a genuine record of the owner asked for counts.
+        if pointer.owner != *owner || pointer.verify().is_err() {
+            return Err(NodeRequestError::ForgedPointer {
+                node: node.to_string(),
+            });
+        }
+        Ok(Some(pointer))
     }
 
     /// The HTTP client, for requests to coordinators.

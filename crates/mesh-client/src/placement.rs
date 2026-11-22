@@ -130,8 +130,8 @@ async fn store_one(
 }
 
 /// Whether `candidate` may hold a piece of a chunk whose pieces are on
-/// `chosen`.
-fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo]) -> bool {
+/// `chosen`. Pointers spread their copies by the same rules.
+pub(crate) fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo]) -> bool {
     let same_operator = chosen
         .iter()
         .filter(|node| node.operator == candidate.operator)
