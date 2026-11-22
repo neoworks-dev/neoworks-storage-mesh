@@ -31,7 +31,7 @@ pub struct ChunkRecord {
 }
 
 /// One piece and the node holding it.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlacedPiece {
     pub id: PieceId,
     /// The node's base URL, e.g. `http://127.0.0.1:7001`.

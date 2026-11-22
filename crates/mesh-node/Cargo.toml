@@ -12,6 +12,7 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 mesh-core.workspace = true
+rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 

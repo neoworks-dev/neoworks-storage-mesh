@@ -19,8 +19,10 @@ it into erasure-coded pieces and spread those over independent nodes.
 ## Status
 
 Early. A file can be stored on six nodes and read back while any two of them
-are down, have lost their pieces or return corrupted ones. There are no
-coordinators, tokens, leases or audits yet; the issues track what comes next.
+are down, have lost their pieces or return corrupted ones. Nodes keep each
+piece for a lease and delete it once the lease ends unless it is renewed,
+which is also how a file is deleted. There are no coordinators, tokens or
+audits yet; the issues track what comes next.
 
 ## Layout
 
@@ -52,6 +54,13 @@ target/release/mesh get photo.manifest.json photo-again.jpg
 ```
 
 The manifest holds the file's key, so anyone who has it can read the file.
+
+`put` stores a file for 30 days by default (`--days` changes it). To keep it
+longer, renew it before then:
+
+```sh
+target/release/mesh renew photo.manifest.json --days 30
+```
 
 ## License
 

@@ -1,63 +1,17 @@
 //! Stores a file on six real nodes over HTTP and reads it back, also after
 //! nodes go down, lose pieces or return corrupted ones.
 
-use mesh_client::erasure::{RebuildError, TOTAL_PIECES};
+mod test_nodes;
+
+use std::time::Duration;
+
+use mesh_client::erasure::RebuildError;
 use mesh_client::{CHUNK_BYTES, DownloadError, Manifest, NodeClient, download, upload};
-use mesh_node::PieceStore;
-use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use mesh_node::NodeSettings;
+use test_nodes::{start_nodes, urls};
 
-/// A node running in this process, with its own data directory.
-struct TestNode {
-    url: String,
-    data: TempDir,
-    server: JoinHandle<std::io::Result<()>>,
-}
-
-impl TestNode {
-    async fn start() -> TestNode {
-        let data = tempfile::tempdir().unwrap();
-        let store = PieceStore::open(data.path()).await.unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(mesh_node::serve(listener, store));
-        TestNode { url, data, server }
-    }
-
-    /// Stops the node: its port refuses new connections.
-    fn stop(&self) {
-        self.server.abort();
-    }
-
-    /// Deletes every piece the node holds, as if its disk had been wiped.
-    fn lose_all_pieces(&self) {
-        for entry in std::fs::read_dir(self.data.path()).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
-        }
-    }
-
-    /// Overwrites every piece the node holds with other bytes of the same length.
-    fn corrupt_all_pieces(&self) {
-        for entry in std::fs::read_dir(self.data.path()).unwrap() {
-            let path = entry.unwrap().path();
-            let length = std::fs::metadata(&path).unwrap().len() as usize;
-            std::fs::write(&path, vec![0xAB; length]).unwrap();
-        }
-    }
-}
-
-async fn start_nodes() -> Vec<TestNode> {
-    let mut nodes = Vec::new();
-    for _ in 0..TOTAL_PIECES {
-        nodes.push(TestNode::start().await);
-    }
-    nodes
-}
-
-fn urls(nodes: &[TestNode]) -> Vec<String> {
-    nodes.iter().map(|node| node.url.clone()).collect()
-}
+/// Long enough that no piece expires while a test runs.
+const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Two and a half chunks of bytes that differ from position to position, so a
 /// misplaced piece would show.
@@ -75,10 +29,10 @@ async fn read_back(manifest: &Manifest) -> Result<Vec<u8>, DownloadError> {
 
 #[tokio::test]
 async fn a_file_comes_back_unchanged() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
     let file = sample_file();
 
-    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file)
+    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file, LEASE)
         .await
         .unwrap();
 
@@ -88,18 +42,18 @@ async fn a_file_comes_back_unchanged() {
 
 #[tokio::test]
 async fn nodes_only_ever_hold_noise() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
     let file = vec![b'A'; CHUNK_BYTES];
 
-    upload(&NodeClient::new().unwrap(), &urls(&nodes), &file)
+    upload(&NodeClient::new().unwrap(), &urls(&nodes), &file, LEASE)
         .await
         .unwrap();
 
     // A megabyte of 'A' would show up as long runs of 'A' in any piece that
     // held plaintext. Sealed bytes have none.
     for node in &nodes {
-        for entry in std::fs::read_dir(node.data.path()).unwrap() {
-            let piece = std::fs::read(entry.unwrap().path()).unwrap();
+        for path in node.piece_files() {
+            let piece = std::fs::read(path).unwrap();
             assert!(!piece.windows(16).any(|window| window == [b'A'; 16]));
         }
     }
@@ -107,9 +61,9 @@ async fn nodes_only_ever_hold_noise() {
 
 #[tokio::test]
 async fn survives_two_nodes_going_down() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
     let file = sample_file();
-    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file)
+    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file, LEASE)
         .await
         .unwrap();
 
@@ -121,9 +75,9 @@ async fn survives_two_nodes_going_down() {
 
 #[tokio::test]
 async fn survives_one_node_losing_and_one_corrupting_its_pieces() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
     let file = sample_file();
-    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file)
+    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file, LEASE)
         .await
         .unwrap();
 
@@ -135,8 +89,9 @@ async fn survives_one_node_losing_and_one_corrupting_its_pieces() {
 
 #[tokio::test]
 async fn fails_when_three_nodes_are_down() {
-    let nodes = start_nodes().await;
-    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &sample_file())
+    let nodes = start_nodes(NodeSettings::default()).await;
+    let file = sample_file();
+    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &file, LEASE)
         .await
         .unwrap();
 
@@ -157,9 +112,9 @@ async fn fails_when_three_nodes_are_down() {
 
 #[tokio::test]
 async fn an_empty_file_comes_back_empty() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
 
-    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &[])
+    let manifest = upload(&NodeClient::new().unwrap(), &urls(&nodes), &[], LEASE)
         .await
         .unwrap();
 
@@ -169,9 +124,15 @@ async fn an_empty_file_comes_back_empty() {
 
 #[tokio::test]
 async fn refuses_anything_but_six_nodes() {
-    let nodes = start_nodes().await;
+    let nodes = start_nodes(NodeSettings::default()).await;
 
-    let result = upload(&NodeClient::new().unwrap(), &urls(&nodes[..5]), b"photo").await;
+    let result = upload(
+        &NodeClient::new().unwrap(),
+        &urls(&nodes[..5]),
+        b"photo",
+        LEASE,
+    )
+    .await;
 
     assert!(matches!(
         result,
