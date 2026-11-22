@@ -11,12 +11,14 @@ use axum::{Json, Router};
 use mesh_core::node_list::NodeRecord;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
 use mesh_core::signed::{Signed, SigningKey};
+use tokio::sync::Mutex;
 
 use crate::accounts::Accounts;
 use crate::clock::unix_now;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
 use crate::registry::{Registered, Registry};
+use crate::sign_in_limits::FailedSignIns;
 use crate::sign_in_routes;
 use crate::token_issuer::TokenIssuer;
 use crate::token_routes;
@@ -26,6 +28,7 @@ use crate::token_routes;
 pub struct Coordinator {
     pub registry: Arc<Registry>,
     pub accounts: Arc<Accounts>,
+    pub failed_sign_ins: Arc<Mutex<FailedSignIns>>,
     pub tokens: Arc<TokenIssuer>,
     /// The coordinator's key, which signs token keys.
     pub key: SigningKey,
