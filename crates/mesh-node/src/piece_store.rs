@@ -120,6 +120,20 @@ impl PieceStore {
         }
     }
 
+    /// The length of the piece `id`, or `None` when the node does not hold it
+    /// at `now`.
+    pub async fn len_of(&self, id: &PieceId, now: u64) -> Result<Option<u64>, StoreError> {
+        let lease_end = self.leases.lock().await.expires_at(id)?;
+        if !lease_end.is_some_and(|end| end > now) {
+            return Ok(None);
+        }
+        match tokio::fs::metadata(self.path_of(id)).await {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Deletes every piece whose lease ended at or before `now`, and returns
     /// how many there were.
     pub async fn remove_ended(&self, now: u64) -> Result<usize, StoreError> {

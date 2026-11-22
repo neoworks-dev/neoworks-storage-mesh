@@ -47,6 +47,7 @@ mod random;
 mod renew;
 mod repair;
 pub mod sign_in;
+pub mod tabs;
 pub mod tokens;
 mod upload;
 pub mod version_graph;

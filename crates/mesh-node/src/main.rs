@@ -38,6 +38,10 @@ struct Arguments {
     /// The longest lease the node grants, in days.
     #[arg(long, default_value_t = 30)]
     max_lease_days: u64,
+    /// Store pieces only against tabs paid with tokens, spent at this
+    /// coordinator.
+    #[arg(long)]
+    require_tokens: Option<String>,
     #[command(flatten)]
     registration: RegistrationArguments,
 }
@@ -86,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let arguments = Arguments::parse();
     let settings = NodeSettings {
         max_lease: Duration::from_secs(arguments.max_lease_days * 24 * 60 * 60),
+        require_tokens: arguments.require_tokens.clone(),
         ..NodeSettings::default()
     };
     let data = NodeData::open(&arguments.data)

@@ -4,7 +4,8 @@
 //! compared with the id it was asked for, and every pointer is checked for
 //! its owner's signature.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use mesh_core::PieceId;
@@ -15,6 +16,8 @@ use mesh_core::protocol::{
     IDENTITY_ROUTE, LeaseResponse, NodeIdentity, PointerConflict, challenge_path, lease_path,
     piece_path, pointer_path,
 };
+use mesh_core::tabs::{OpenTabRequest, TabResponse, tab_path, tab_pieces_path};
+use mesh_core::tokens::Token;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Response, StatusCode};
 use serde::de::DeserializeOwned;
@@ -32,6 +35,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct NodeClient {
     http: reqwest::Client,
     latencies: Arc<LatencyTable>,
+    /// The tab to store pieces against, by node URL, on nodes that require
+    /// tokens. Pieces for other nodes get a lease of the asked length.
+    tabs: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// A request to a node that did not succeed.
@@ -98,7 +104,72 @@ impl NodeClient {
         Ok(NodeClient {
             http,
             latencies: Arc::default(),
+            tabs: Arc::default(),
         })
+    }
+
+    /// Pays the tab `name` on `node` with `tokens`, and stores pieces on that
+    /// node against it from now on.
+    pub async fn pay_tab(
+        &self,
+        node: &str,
+        name: &str,
+        tokens: &[Token],
+    ) -> Result<TabResponse, NodeRequestError> {
+        let request = OpenTabRequest {
+            tokens: tokens.to_vec(),
+        };
+        // Tokens are plain integers and bytes, which always serialize.
+        let body = serde_json::to_vec(&request).expect("tokens serialize");
+        let response = self
+            .http
+            .post(node_url(node, &tab_path(name)))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let tab = read_json(node, response).await?;
+        self.lock_tabs().insert(node.to_string(), name.to_string());
+        Ok(tab)
+    }
+
+    /// Moves `ids` on `node` into its tab `name`, which renews them until the
+    /// tab ends. Returns, in order, when each piece ends now, or `None` for a
+    /// piece the node does not hold.
+    pub async fn move_to_tab(
+        &self,
+        node: &str,
+        name: &str,
+        ids: &[PieceId],
+    ) -> Result<Vec<Option<u64>>, NodeRequestError> {
+        let request = BatchRenewRequest {
+            pieces: ids.to_vec(),
+        };
+        // A list of piece ids always serializes.
+        let body = serde_json::to_vec(&request).expect("a batch serializes");
+        let response = self
+            .http
+            .post(node_url(node, &tab_pieces_path(name)))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| unreachable(node, source))?;
+        if !response.status().is_success() {
+            return Err(refused(node, response).await);
+        }
+        let answer: BatchRenewResponse = read_json(node, response).await?;
+        Ok(answer.lease_ends)
+    }
+
+    fn lock_tabs(&self) -> MutexGuard<'_, HashMap<String, String>> {
+        // The map holds plain strings, so whatever a thread that panicked
+        // while holding the lock left behind is still a valid map.
+        self.tabs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Renews the leases of `ids` on `node` to end no sooner than `lease` from
@@ -209,8 +280,9 @@ impl NodeClient {
         &self.latencies
     }
 
-    /// Stores `bytes` as the piece `id` on `node` for `lease`, and returns
-    /// when the lease ends, in Unix seconds on the node's clock.
+    /// Stores `bytes` as the piece `id` on `node` for `lease`, or against the
+    /// node's tab when one was paid, and returns when the lease ends, in Unix
+    /// seconds on the node's clock.
     pub async fn put(
         &self,
         node: &str,
@@ -218,7 +290,13 @@ impl NodeClient {
         bytes: Vec<u8>,
         lease: Duration,
     ) -> Result<u64, NodeRequestError> {
-        let url = with_lease(node_url(node, &piece_path(id)), lease);
+        let piece_url = node_url(node, &piece_path(id));
+        // A node with a tab paid gets the piece against it; its lease is then
+        // the tab's, whatever `lease` asks for.
+        let url = match self.lock_tabs().get(node) {
+            Some(tab) => format!("{piece_url}?tab={tab}"),
+            None => with_lease(piece_url, lease),
+        };
         let response = self
             .http
             .put(url)

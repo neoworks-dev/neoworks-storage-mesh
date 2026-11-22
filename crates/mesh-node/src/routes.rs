@@ -1,5 +1,6 @@
 //! The node's HTTP interface: storing, renewing, fetching pieces and proving
 //! the node still holds them, and storing and fetching signed pointers.
+//! Paying for storage with tabs is in [`tab_routes`](crate::tab_routes).
 //!
 //! `mesh_core::protocol` describes the requests; this module checks them and
 //! maps them onto the [`PieceStore`] and the [`PointerStore`].
@@ -19,23 +20,32 @@ use mesh_core::protocol::{
     MAX_CHALLENGE_SEGMENTS, MAX_PIECE_BYTES, NodeIdentity, PIECE_ROUTE, POINTER_ROUTE,
     PointerConflict,
 };
+use mesh_core::tabs::StoreQuery;
 use mesh_core::{PieceId, merkle};
 
 use crate::clock::unix_now;
 use crate::piece_store::{PieceStore, StoreError};
 use crate::pointer_store::{PointerPut, PointerStore, PointerStoreError};
 use crate::settings::NodeSettings;
+use crate::tab_book::TabBook;
+use crate::tab_routes;
 
 /// What every request handler needs.
 #[derive(Clone)]
-struct Node {
-    store: Arc<PieceStore>,
-    pointers: Arc<PointerStore>,
-    identity: Arc<NodeIdentity>,
-    max_lease_seconds: u64,
+pub(crate) struct Node {
+    pub(crate) store: Arc<PieceStore>,
+    pub(crate) pointers: Arc<PointerStore>,
+    pub(crate) tabs: Arc<TabBook>,
+    pub(crate) identity: Arc<NodeIdentity>,
+    pub(crate) max_lease_seconds: u64,
+    /// The coordinator tokens are spent at, when the node requires them.
+    pub(crate) token_coordinator: Option<String>,
+    /// For spending tokens at the coordinator.
+    pub(crate) http: reqwest::Client,
 }
 
-/// The router of the node `identity`, serving `store` and `pointers`.
+/// The router of the node `identity`, serving `store`, `pointers` and
+/// `tabs`.
 ///
 /// Ids that are not 64 lowercase hex digits and requests without
 /// `lease_seconds` are refused by the extractors with `400 Bad Request` before
@@ -43,14 +53,18 @@ struct Node {
 pub fn router(
     store: Arc<PieceStore>,
     pointers: Arc<PointerStore>,
+    tabs: Arc<TabBook>,
     identity: NodeIdentity,
     settings: &NodeSettings,
 ) -> Router {
     let node = Node {
         store,
         pointers,
+        tabs,
         identity: Arc::new(identity),
         max_lease_seconds: settings.max_lease.as_secs(),
+        token_coordinator: settings.require_tokens.clone(),
+        http: reqwest::Client::new(),
     };
     Router::new()
         .route(PIECE_ROUTE, put(put_piece).get(get_piece))
@@ -59,6 +73,7 @@ pub fn router(
         .route(CHALLENGE_ROUTE, post(answer_challenge))
         .route(POINTER_ROUTE, put(put_pointer).get(get_pointer))
         .route(IDENTITY_ROUTE, get(get_identity))
+        .merge(tab_routes::routes())
         .layer(DefaultBodyLimit::max(MAX_PIECE_BYTES))
         .with_state(node)
 }
@@ -68,16 +83,23 @@ async fn get_identity(State(node): State<Node>) -> Json<NodeIdentity> {
     Json(NodeIdentity::clone(&node.identity))
 }
 
-/// `PUT /pieces/{id}?lease_seconds=N`: stores the body as the piece `id`.
+/// `PUT /pieces/{id}?lease_seconds=N` or `?tab=NAME`: stores the body as the
+/// piece `id`.
 async fn put_piece(
     State(node): State<Node>,
     Path(id): Path<PieceId>,
-    Query(query): Query<LeaseQuery>,
+    Query(query): Query<StoreQuery>,
     body: Bytes,
 ) -> Response {
-    let expires_at = match lease_end(&node, &query) {
+    // Checked before charging a tab, so bytes that would be refused anyway
+    // use up none of what the client paid for.
+    if PieceId::of(&body) != id {
+        let reason = "the bytes do not hash to the piece id";
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    let expires_at = match storage_end(&node, &query, body.len() as u64).await {
         Ok(expires_at) => expires_at,
-        Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
+        Err(refusal) => return refusal.into_response(),
     };
     match node.store.put(&id, &body, expires_at).await {
         Ok(expires_at) => (StatusCode::CREATED, Json(LeaseResponse { expires_at })).into_response(),
@@ -90,12 +112,45 @@ async fn put_piece(
     }
 }
 
+/// When a piece of `len` bytes stored under `query` ends, or the status and
+/// reason that refuse it.
+async fn storage_end(
+    node: &Node,
+    query: &StoreQuery,
+    len: u64,
+) -> Result<u64, (StatusCode, String)> {
+    if let Some(tab) = &query.tab {
+        return tab_routes::charge(node, tab, len).await;
+    }
+    if node.token_coordinator.is_some() {
+        return Err((StatusCode::PAYMENT_REQUIRED, PAYMENT_REQUIRED.to_string()));
+    }
+    let Some(lease_seconds) = query.lease_seconds else {
+        let reason = "give lease_seconds or a tab".to_string();
+        return Err((StatusCode::BAD_REQUEST, reason));
+    };
+    lease_end(node, &LeaseQuery { lease_seconds })
+        .map_err(|reason| (StatusCode::BAD_REQUEST, reason))
+}
+
+const PAYMENT_REQUIRED: &str = "this node stores pieces only against a tab paid with tokens";
+
+/// The answer to free storage on a node that requires tokens.
+fn payment_required() -> Response {
+    (StatusCode::PAYMENT_REQUIRED, PAYMENT_REQUIRED).into_response()
+}
+
 /// `POST /pieces/{id}/lease?lease_seconds=N`: renews the lease of `id`.
 async fn renew_lease(
     State(node): State<Node>,
     Path(id): Path<PieceId>,
     Query(query): Query<LeaseQuery>,
 ) -> Response {
+    // Free renewals would keep pieces alive without paying; with tokens,
+    // renewing is moving pieces into a new tab.
+    if node.token_coordinator.is_some() {
+        return payment_required();
+    }
     let expires_at = match lease_end(&node, &query) {
         Ok(expires_at) => expires_at,
         Err(reason) => return (StatusCode::BAD_REQUEST, reason).into_response(),
@@ -113,6 +168,9 @@ async fn renew_leases(
     Query(query): Query<LeaseQuery>,
     Json(request): Json<BatchRenewRequest>,
 ) -> Response {
+    if node.token_coordinator.is_some() {
+        return payment_required();
+    }
     if request.pieces.len() > MAX_BATCH_PIECES {
         let reason = format!("a batch renews at most {MAX_BATCH_PIECES} pieces");
         return (StatusCode::BAD_REQUEST, reason).into_response();
@@ -239,7 +297,7 @@ fn lease_end(node: &Node, query: &LeaseQuery) -> Result<u64, String> {
 
 /// A disk or database error: logged on the node, answered without detail,
 /// since the client can do nothing with the node's internals.
-fn internal_error(id: &PieceId, error: StoreError) -> Response {
+pub(crate) fn internal_error(id: &PieceId, error: StoreError) -> Response {
     eprintln!("piece {id}: {error}");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }

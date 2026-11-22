@@ -20,6 +20,8 @@ mod registration;
 mod routes;
 mod settings;
 mod sweep;
+pub mod tab_book;
+mod tab_routes;
 
 pub use node_data::{NodeData, OpenError};
 pub use node_key::NodeKeyError;
@@ -28,6 +30,7 @@ pub use pointer_store::{PointerPut, PointerStore, PointerStoreError};
 pub use registration::{Registration, RegistrationError, register, register_forever};
 pub use routes::router;
 pub use settings::NodeSettings;
+pub use tab_book::TabBook;
 
 use std::sync::Arc;
 
@@ -43,11 +46,18 @@ pub async fn serve(
     let identity = data.identity();
     let pieces = Arc::new(data.pieces);
     let pointers = Arc::new(data.pointers);
-    let app = router(pieces.clone(), pointers.clone(), identity, &settings);
+    let tabs = Arc::new(data.tabs);
+    let app = router(
+        pieces.clone(),
+        pointers.clone(),
+        tabs.clone(),
+        identity,
+        &settings,
+    );
     let server = axum::serve(listener, app);
     // Both run on this task, so stopping the node stops its sweep too.
     tokio::select! {
         result = server => result,
-        () = sweep::sweep_forever(pieces, pointers, settings.sweep_interval) => Ok(()),
+        () = sweep::sweep_forever(pieces, pointers, tabs, settings.sweep_interval) => Ok(()),
     }
 }

@@ -5,6 +5,7 @@
 //! <data>/pieces/<64 hex digits>   one file per piece
 //! <data>/leases.sqlite3           when each piece's lease ends
 //! <data>/pointers.sqlite3         signed pointers and their leases
+//! <data>/tabs.sqlite3             paid tabs and what they hold
 //! ```
 
 use std::path::Path;
@@ -16,11 +17,13 @@ use mesh_core::protocol::NodeIdentity;
 use crate::node_key::{self, NodeKeyError};
 use crate::piece_store::{PieceStore, StoreError};
 use crate::pointer_store::PointerStore;
+use crate::tab_book::TabBook;
 
-/// A node's pieces, pointers and key.
+/// A node's pieces, pointers, tabs and key.
 pub struct NodeData {
     pub pieces: PieceStore,
     pub pointers: PointerStore,
+    pub tabs: TabBook,
     pub key: SigningKey,
 }
 
@@ -29,8 +32,8 @@ pub struct NodeData {
 pub enum OpenError {
     #[error("pieces: {0}")]
     Pieces(#[from] StoreError),
-    #[error("pointers: {0}")]
-    Pointers(#[from] rusqlite::Error),
+    #[error("pointers or tabs: {0}")]
+    Database(#[from] rusqlite::Error),
     #[error("{0}")]
     Key(#[from] NodeKeyError),
 }
@@ -42,10 +45,12 @@ impl NodeData {
         let directory = directory.as_ref();
         let pieces = PieceStore::open(directory).await?;
         let pointers = PointerStore::open(directory)?;
+        let tabs = TabBook::open(directory)?;
         let key = node_key::load_or_create(directory)?;
         Ok(NodeData {
             pieces,
             pointers,
+            tabs,
             key,
         })
     }
