@@ -46,6 +46,7 @@ use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
 };
 use mesh_core::node_list::CoordinatorList;
+use mesh_core::tokens::TokenKind;
 
 use crate::account_commands::AccountArguments;
 
@@ -132,8 +133,23 @@ enum Command {
         account: AccountArguments,
     },
     /// Renews everything the account keeps, one request per node; meant to
-    /// run from a timer, such as weekly.
+    /// run from a timer, such as weekly. With a coordinator, nodes that
+    /// require tokens are paid from the account's wallet.
     RenewAll {
+        #[command(flatten)]
+        account: AccountArguments,
+    },
+    /// Takes tokens for the account's wallet from the coordinator, signing in
+    /// with a password read from standard input.
+    TakeTokens {
+        email: String,
+        /// How many tokens to take.
+        #[arg(long)]
+        count: usize,
+        /// Take allowance tokens, which only the coordinator's own nodes
+        /// accept, instead of paid ones from the account's balance.
+        #[arg(long)]
+        allowance: bool,
         #[command(flatten)]
         account: AccountArguments,
     },
@@ -232,6 +248,19 @@ async fn main() -> anyhow::Result<()> {
         } => account_commands::store(&client, &file, name, &account).await,
         Command::Ls { account } => account_commands::list_files(&client, &account).await,
         Command::RenewAll { account } => account_commands::renew_all(&client, &account).await,
+        Command::TakeTokens {
+            email,
+            count,
+            allowance,
+            account,
+        } => {
+            let kind = if allowance {
+                TokenKind::Allowance
+            } else {
+                TokenKind::Paid
+            };
+            account_commands::take_tokens(&client, &email, count, kind, &account).await
+        }
         Command::Fetch {
             name,
             output,
@@ -249,15 +278,10 @@ async fn load_node_list(
     if let Some(path) = &source.nodes {
         return NodeList::read(path).with_context(|| format!("reading {}", path.display()));
     }
-    // clap requires either `--nodes` or both of these.
-    let (Some(coordinator), Some(coordinators_path)) = (&source.coordinator, &source.coordinators)
-    else {
+    // clap requires either `--nodes` or both coordinator options.
+    let Some((coordinator, coordinators)) = coordinator_of(arguments)? else {
         anyhow::bail!("give --nodes, or --coordinator with --coordinators");
     };
-    let json = std::fs::read(coordinators_path)
-        .with_context(|| format!("reading {}", coordinators_path.display()))?;
-    let coordinators: CoordinatorList = serde_json::from_slice(&json)
-        .with_context(|| format!("parsing {}", coordinators_path.display()))?;
     let kept_path = &arguments.kept_node_list;
     let fetched = NodeList::fetch_keeping_newest(client, coordinator, &coordinators, kept_path)
         .await
@@ -276,6 +300,23 @@ async fn load_node_list(
         ),
     }
     Ok(fetched.list)
+}
+
+/// The coordinator the arguments name and the coordinator list read from
+/// `--coordinators`, or `None` when they name a node list file instead.
+fn coordinator_of(
+    arguments: &NodeListArguments,
+) -> anyhow::Result<Option<(&str, CoordinatorList)>> {
+    let source = &arguments.source;
+    let (Some(coordinator), Some(coordinators_path)) = (&source.coordinator, &source.coordinators)
+    else {
+        return Ok(None);
+    };
+    let json = std::fs::read(coordinators_path)
+        .with_context(|| format!("reading {}", coordinators_path.display()))?;
+    let coordinators: CoordinatorList = serde_json::from_slice(&json)
+        .with_context(|| format!("parsing {}", coordinators_path.display()))?;
+    Ok(Some((coordinator, coordinators)))
 }
 
 async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()> {
