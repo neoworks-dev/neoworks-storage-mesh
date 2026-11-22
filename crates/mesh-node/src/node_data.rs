@@ -6,6 +6,7 @@
 //! <data>/leases.sqlite3           when each piece's lease ends
 //! <data>/pointers.sqlite3         signed pointers and their leases
 //! <data>/tabs.sqlite3             paid tabs and what they hold
+//! <data>/mailboxes.sqlite3        mailbox messages and their leases
 //! ```
 
 use std::path::Path;
@@ -14,16 +15,18 @@ use mesh_core::NodeId;
 use mesh_core::pointer::SigningKey;
 use mesh_core::protocol::NodeIdentity;
 
+use crate::mailbox_store::MailboxStore;
 use crate::node_key::{self, NodeKeyError};
 use crate::piece_store::{PieceStore, StoreError};
 use crate::pointer_store::PointerStore;
 use crate::tab_book::TabBook;
 
-/// A node's pieces, pointers, tabs and key.
+/// A node's pieces, pointers, tabs, mailboxes and key.
 pub struct NodeData {
     pub pieces: PieceStore,
     pub pointers: PointerStore,
     pub tabs: TabBook,
+    pub mailboxes: MailboxStore,
     pub key: SigningKey,
 }
 
@@ -32,7 +35,7 @@ pub struct NodeData {
 pub enum OpenError {
     #[error("pieces: {0}")]
     Pieces(#[from] StoreError),
-    #[error("pointers or tabs: {0}")]
+    #[error("pointers, tabs or mailboxes: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("{0}")]
     Key(#[from] NodeKeyError),
@@ -46,11 +49,13 @@ impl NodeData {
         let pieces = PieceStore::open(directory).await?;
         let pointers = PointerStore::open(directory)?;
         let tabs = TabBook::open(directory)?;
+        let mailboxes = MailboxStore::open(directory)?;
         let key = node_key::load_or_create(directory)?;
         Ok(NodeData {
             pieces,
             pointers,
             tabs,
+            mailboxes,
             key,
         })
     }

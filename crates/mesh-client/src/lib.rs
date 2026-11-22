@@ -26,6 +26,9 @@
 //! Structured data, such as a calendar, is a [`version_graph`] of commits
 //! like git's: each device keeps the whole graph, stores its commits in the
 //! mesh, and names its newest one in a pointer of its own ([`commits`]).
+//!
+//! People leave each other small sealed messages in [`mailboxes`] on nodes,
+//! found by a hash of the recipient's key and the week.
 
 pub mod account;
 mod audit;
@@ -36,6 +39,7 @@ mod download;
 pub mod encryption;
 pub mod erasure;
 pub mod index;
+pub mod mailboxes;
 mod manifest;
 pub mod merge;
 mod node_client;

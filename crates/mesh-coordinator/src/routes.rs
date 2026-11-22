@@ -1,6 +1,7 @@
 //! The coordinator's HTTP interface: nodes register and name their operator,
-//! clients fetch the node list and the prices, and people sign up and sign
-//! in ([`sign_in_routes`]).
+//! clients fetch the node list and the prices, people sign up and sign in
+//! ([`sign_in_routes`]), and they find each other's mailbox keys
+//! ([`mailbox_key_routes`]).
 
 use std::sync::Arc;
 
@@ -19,6 +20,8 @@ use mesh_core::signed::{Signed, SigningKey};
 use crate::accounts::Accounts;
 use crate::clock::unix_now;
 use crate::earnings::{Earnings, Linked};
+use crate::mailbox_key_routes;
+use crate::mailbox_keys::MailboxKeys;
 use crate::price_book::LatestPrices;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
@@ -33,8 +36,9 @@ pub struct Coordinator {
     pub registry: Arc<Registry>,
     pub earnings: Arc<Earnings>,
     pub accounts: Arc<Accounts>,
+    pub mailbox_keys: Arc<MailboxKeys>,
     pub tokens: Arc<TokenIssuer>,
-    /// The coordinator's key, which signs token keys.
+    /// The coordinator's key, which signs token keys and mailbox keys.
     pub key: SigningKey,
     pub latest: Arc<LatestSnapshot>,
     pub prices: Arc<LatestPrices>,
@@ -56,6 +60,7 @@ pub fn router(coordinator: Coordinator) -> Router {
         .route(PRICES_ROUTE, get(prices))
         .merge(sign_in_routes::routes())
         .merge(token_routes::routes())
+        .merge(mailbox_key_routes::routes())
         .with_state(coordinator)
 }
 

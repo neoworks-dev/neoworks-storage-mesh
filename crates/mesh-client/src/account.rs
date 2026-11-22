@@ -5,7 +5,8 @@
 //!
 //! - the key that signs the account's index pointer,
 //! - the dedup key its files' and commits' chunk keys come from,
-//! - the message key that seals where the pointer leads.
+//! - the message key that seals where the pointer leads,
+//! - the mailbox key others seal messages to the account with.
 //!
 //! Knowing one derived key reveals nothing about the secret or the others.
 //! The secret reaches a new device by signing in with an email and password
@@ -75,6 +76,12 @@ impl Account {
     /// The key that seals where the index pointer leads.
     pub fn message_key(&self) -> MessageKey {
         MessageKey::from_bytes(self.derive("neoworks-mesh account message key v1"))
+    }
+
+    /// The X25519 secret key messages to the account's mailboxes are sealed
+    /// to ([`mailboxes`](crate::mailboxes)).
+    pub fn mailbox_secret(&self) -> [u8; 32] {
+        self.derive("neoworks-mesh account mailbox key v1")
     }
 
     fn derive(&self, context: &str) -> [u8; 32] {
