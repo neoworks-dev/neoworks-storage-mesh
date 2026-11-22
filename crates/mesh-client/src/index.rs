@@ -1,11 +1,13 @@
-//! The account's index: every stored file's manifest, kept in the mesh.
+//! The account's index: every stored file's manifest and every collection's
+//! keys, kept in the mesh.
 //!
-//! Without it, losing a manifest loses the file. The index is a collection in
-//! the [`version_graph`](crate::version_graph): one entry per file, named by
-//! the file's name, with its manifest and when its leases need renewing. Its
-//! newest commit is named by the account's pointer, so a new device holding
-//! only the account's secret reads the pointer, then the index, then any
-//! file.
+//! Without it, losing a manifest loses the file. The index is a
+//! [`Collection`](crate::collection::Collection) under keys derived from the
+//! account's secret: one entry per file, named by the file's name, with its
+//! manifest and when its leases need renewing, and one entry per collection
+//! with that collection's own keys. A new device holding only the account's
+//! secret reads the account's pointer, then the index, then any file or
+//! collection.
 //!
 //! All devices of an account move the same pointer. When a device finds a
 //! version there it has not seen, another device saved in the meantime: it
@@ -14,25 +16,23 @@
 //! their files.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub use crate::collection::unix_now;
+
 use crate::account::Account;
 use crate::batch_renew::{BatchRenewal, renew_pieces};
-use crate::commits::{
-    FetchCommitError, PublishHeadError, ReadHeadError, fetch_new, publish_head, read_head,
-    store_commit,
-};
+use crate::collection::{Collection, CollectionError, CollectionKeys, Writer};
+use crate::commits::{FetchCommitError, PublishHeadError, ReadHeadError};
 use crate::erasure::DATA_PIECES;
 use crate::manifest::Manifest;
-use crate::merge::{MergeOutcome, merge};
 use crate::node_client::NodeClient;
 use crate::node_list::NodeList;
-use crate::pointers::{ReadPointerError, WritePointerError};
 use crate::upload::UploadError;
-use crate::version_graph::{Change, Commit, CommitRef, Entries, Graph, MissingCommit};
+use crate::version_graph::{Change, Entries, MissingCommit};
 
 /// The field of an entry holding the file's manifest.
 pub const FIELD_MANIFEST: u32 = 1;
@@ -40,11 +40,13 @@ pub const FIELD_MANIFEST: u32 = 1;
 pub const FIELD_SIZE: u32 = 2;
 /// The field holding when the file's leases need renewing, in Unix seconds.
 pub const FIELD_RENEW_BY: u32 = 3;
+/// The field of a collection's entry holding its keys, as
+/// [`CollectionKeys::to_hex`] writes them.
+pub const FIELD_COLLECTION_KEYS: u32 = 4;
 
-/// How often a save retries after another device moved the pointer first.
-/// Each retry merges what that device saved, so only devices saving many
-/// times a second at once could use them all up.
-const MAX_SAVE_ATTEMPTS: usize = 5;
+/// What collection entries' names start with. No file name holds a NUL
+/// byte on any system, so a collection can never share an entry with a file.
+const COLLECTION_PREFIX: &str = "\0collection/";
 
 /// One file in the index.
 #[derive(Clone)]
@@ -67,6 +69,23 @@ pub struct Session<'a> {
     pub lease: Duration,
 }
 
+impl Session<'_> {
+    /// The index's writer: the account's own keys.
+    fn writer(&self) -> Writer<'_> {
+        Writer {
+            client: self.client,
+            list: self.list,
+            keys: CollectionKeys {
+                head_key: self.account.pointer_key(),
+                read_key: self.account.message_key(),
+            },
+            dedup_key: self.account.dedup_key(),
+            device: self.device.clone(),
+            lease: self.lease,
+        }
+    }
+}
+
 /// Why the index could not be read or saved.
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
@@ -84,15 +103,28 @@ pub enum IndexError {
     Damaged(String),
     #[error("other devices kept moving the pointer; try again")]
     Contended,
+    #[error("the index already has a collection called {0}")]
+    CollectionExists(String),
 }
 
-/// The index as this device knows it: the graph, its head, and the newest
-/// pointer version it has seen. It is kept on the device between runs.
+impl From<CollectionError> for IndexError {
+    fn from(error: CollectionError) -> Self {
+        match error {
+            CollectionError::Store(error) => IndexError::Store(error),
+            CollectionError::Fetch(error) => IndexError::Fetch(error),
+            CollectionError::ReadHead(error) => IndexError::ReadHead(error),
+            CollectionError::PublishHead(error) => IndexError::PublishHead(error),
+            CollectionError::Missing(error) => IndexError::Missing(error),
+            CollectionError::Contended => IndexError::Contended,
+        }
+    }
+}
+
+/// The index as this device knows it. It is kept on the device between runs.
 #[derive(Default, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Index {
-    graph: Graph,
-    head: Option<CommitRef>,
-    version: u64,
+    collection: Collection,
 }
 
 impl Index {
@@ -100,6 +132,7 @@ impl Index {
     pub fn files(&self) -> Result<Vec<IndexedFile>, IndexError> {
         self.entries()?
             .iter()
+            .filter(|(name, _)| !name.starts_with(COLLECTION_PREFIX))
             .map(|(name, fields)| to_file(name, fields))
             .collect()
     }
@@ -145,6 +178,43 @@ impl Index {
         self.save(session, changes).await
     }
 
+    /// Makes a collection called `name` with keys of its own, keeps the keys
+    /// in the index, saves it, and returns the keys.
+    pub async fn create_collection(
+        &mut self,
+        session: &Session<'_>,
+        name: &str,
+    ) -> Result<CollectionKeys, IndexError> {
+        self.pull(session).await?;
+        if self.collection_keys(name)?.is_some() {
+            return Err(IndexError::CollectionExists(name.to_string()));
+        }
+        let keys = CollectionKeys::generate();
+        let entry = format!("{COLLECTION_PREFIX}{name}");
+        let changes = vec![set(&entry, FIELD_COLLECTION_KEYS, json!(keys.to_hex()))];
+        self.save(session, changes).await?;
+        Ok(keys)
+    }
+
+    /// The keys of the collection called `name`, if the index has it.
+    pub fn collection_keys(&self, name: &str) -> Result<Option<CollectionKeys>, IndexError> {
+        let entries = self.entries()?;
+        let Some(fields) = entries.get(&format!("{COLLECTION_PREFIX}{name}")) else {
+            return Ok(None);
+        };
+        Ok(Some(to_keys(name, fields)?))
+    }
+
+    /// The names of every collection in the index.
+    pub fn collections(&self) -> Result<Vec<String>, IndexError> {
+        Ok(self
+            .entries()?
+            .keys()
+            .filter_map(|name| name.strip_prefix(COLLECTION_PREFIX))
+            .map(str::to_string)
+            .collect())
+    }
+
     /// Renews everything the account keeps for `session.lease`: every file's
     /// pieces, the index's own commits, and its pointer. Files whose pieces
     /// all held get the new renewal date.
@@ -155,7 +225,7 @@ impl Index {
     pub async fn renew(&mut self, session: &Session<'_>) -> Result<IndexRenewal, IndexError> {
         self.pull(session).await?;
         let files = self.files()?;
-        let commit_manifests = self.commit_manifests()?;
+        let commit_manifests = self.collection.commit_manifests()?;
         let renewed_until = unix_now() + session.lease.as_secs();
         let pieces = files
             .iter()
@@ -173,7 +243,7 @@ impl Index {
             .collect();
         // Saving writes the pointer anew, which renews it too.
         if changes.is_empty() {
-            self.publish(session).await?;
+            self.collection.publish(&session.writer()).await?;
         } else {
             self.save(session, changes).await?;
         }
@@ -184,29 +254,10 @@ impl Index {
         })
     }
 
-    /// The manifests of every commit in the index's history.
-    fn commit_manifests(&self) -> Result<Vec<Manifest>, IndexError> {
-        let Some(head) = &self.head else {
-            return Ok(Vec::new());
-        };
-        let mut manifests = vec![head.manifest.clone()];
-        for id in self.graph.history(&head.id)? {
-            let commit = self.graph.get(&id).ok_or(MissingCommit(id))?;
-            manifests.extend(commit.parents.iter().map(|parent| parent.manifest.clone()));
-        }
-        Ok(manifests)
-    }
-
     /// Brings this device's index up to date with the account's pointer,
     /// merging when both sides saved something the other lacks.
     pub async fn pull(&mut self, session: &Session<'_>) -> Result<(), IndexError> {
-        let Some((remote, version)) = self.read_remote(session).await? else {
-            return Ok(());
-        };
-        if self.integrate(session, remote, version).await? {
-            self.publish(session).await?;
-        }
-        Ok(())
+        Ok(self.collection.pull(&session.writer()).await?)
     }
 
     /// Commits `changes` on top of this device's head and moves the
@@ -216,129 +267,11 @@ impl Index {
         session: &Session<'_>,
         changes: Vec<Change>,
     ) -> Result<(), IndexError> {
-        let commit = Commit {
-            parents: self.head.iter().cloned().collect(),
-            device: session.device.clone(),
-            made_at: unix_now(),
-            changes,
-        };
-        self.head = Some(self.store(session, commit).await?);
-        self.publish(session).await
-    }
-
-    /// Moves the account's pointer to this device's head. When another
-    /// device moved it first, merges that device's head in and tries again.
-    async fn publish(&mut self, session: &Session<'_>) -> Result<(), IndexError> {
-        for _ in 0..MAX_SAVE_ATTEMPTS {
-            // `save` and `integrate` set a head before publishing.
-            let Some(head) = self.head.clone() else {
-                return Ok(());
-            };
-            let account = session.account;
-            let published = publish_head(
-                session.client,
-                session.list,
-                &account.pointer_key(),
-                &account.message_key(),
-                &head,
-                self.version + 1,
-                session.lease,
-            )
-            .await;
-            match published {
-                Ok(_) => {
-                    self.version += 1;
-                    return Ok(());
-                }
-                Err(PublishHeadError::Write(WritePointerError::NotNewest { .. })) => {}
-                Err(error) => return Err(error.into()),
-            }
-            let Some((remote, version)) = self.read_remote(session).await? else {
-                continue;
-            };
-            self.integrate(session, remote, version).await?;
-        }
-        Err(IndexError::Contended)
-    }
-
-    /// The head the account's pointer names and its version, or `None` when
-    /// nothing was published yet.
-    async fn read_remote(
-        &self,
-        session: &Session<'_>,
-    ) -> Result<Option<(CommitRef, u64)>, IndexError> {
-        let account = session.account;
-        // A device that has seen version N must never accept less: that is
-        // a node holding back newer saves.
-        let last_seen = (self.version > 0).then_some(self.version);
-        let read = read_head(
-            session.client,
-            session.list,
-            &account.pointer_owner(),
-            &account.message_key(),
-            last_seen,
-        )
-        .await;
-        match read {
-            Ok(remote) => Ok(Some(remote)),
-            Err(ReadHeadError::Pointer(ReadPointerError::NotFound)) if last_seen.is_none() => {
-                Ok(None)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    /// Takes in the head `remote` at pointer `version`, merging it with this
-    /// device's head. Returns whether the result is a head the pointer does
-    /// not name yet.
-    async fn integrate(
-        &mut self,
-        session: &Session<'_>,
-        remote: CommitRef,
-        version: u64,
-    ) -> Result<bool, IndexError> {
-        fetch_new(session.client, &mut self.graph, &remote).await?;
-        self.version = self.version.max(version);
-        let Some(local) = &self.head else {
-            self.head = Some(remote);
-            return Ok(false);
-        };
-        match merge(&self.graph, local, &remote)? {
-            MergeOutcome::FastForward(head) => {
-                let is_new = head.id != remote.id;
-                self.head = Some(head);
-                Ok(is_new)
-            }
-            MergeOutcome::Merged { commit, .. } => {
-                self.head = Some(self.store(session, commit).await?);
-                Ok(true)
-            }
-        }
-    }
-
-    /// Stores `commit`, adds it to the graph and returns its reference.
-    async fn store(
-        &mut self,
-        session: &Session<'_>,
-        commit: Commit,
-    ) -> Result<CommitRef, IndexError> {
-        let reference = store_commit(
-            session.client,
-            session.list,
-            &session.account.dedup_key(),
-            &commit,
-            session.lease,
-        )
-        .await?;
-        self.graph.insert(reference.id, commit);
-        Ok(reference)
+        Ok(self.collection.save(&session.writer(), changes).await?)
     }
 
     fn entries(&self) -> Result<Entries, IndexError> {
-        match &self.head {
-            Some(head) => Ok(self.graph.entries_at(&head.id)?),
-            None => Ok(Entries::new()),
-        }
+        Ok(self.collection.entries()?)
     }
 }
 
@@ -387,11 +320,11 @@ fn to_file(name: &str, fields: &BTreeMap<u32, Value>) -> Result<IndexedFile, Ind
     })
 }
 
-/// The current Unix time in seconds.
-pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        // Only a clock set before 1970 fails here, and leases can't work on one.
-        .expect("the system clock is after 1970")
-        .as_secs()
+/// The keys of the collection `name` from its entry's fields.
+fn to_keys(name: &str, fields: &BTreeMap<u32, Value>) -> Result<CollectionKeys, IndexError> {
+    fields
+        .get(&FIELD_COLLECTION_KEYS)
+        .and_then(Value::as_str)
+        .and_then(CollectionKeys::from_hex)
+        .ok_or_else(|| IndexError::Damaged(name.to_string()))
 }

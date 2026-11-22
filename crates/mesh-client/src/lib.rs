@@ -25,12 +25,15 @@
 //!
 //! Structured data, such as a calendar, is a [`version_graph`] of commits
 //! like git's: each device keeps the whole graph, stores its commits in the
-//! mesh, and names its newest one in a pointer of its own ([`commits`]).
+//! mesh, and names its newest one in a pointer ([`commits`]). Each such
+//! [`collection`] has keys of its own, kept in the account's [`index`], so
+//! one collection can be shared without the rest.
 
 pub mod account;
 mod audit;
 pub mod batch_renew;
 pub mod chunking;
+pub mod collection;
 pub mod commits;
 mod download;
 pub mod encryption;

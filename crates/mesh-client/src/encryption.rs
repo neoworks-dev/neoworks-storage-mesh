@@ -144,6 +144,12 @@ impl MessageKey {
         MessageKey(bytes)
     }
 
+    /// The key's bytes, for keeping it or handing it to someone it is shared
+    /// with.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
     fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.0))
     }
