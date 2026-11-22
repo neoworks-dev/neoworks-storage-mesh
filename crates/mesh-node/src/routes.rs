@@ -1,7 +1,8 @@
 //! The node's HTTP interface: storing, renewing, fetching pieces and proving
 //! the node still holds them, and storing and fetching signed pointers.
-//! Paying for storage with tabs is in [`tab_routes`](crate::tab_routes), and
-//! speed tests and usage are in [`speed_test`](crate::speed_test) and
+//! Paying for storage with tabs is in [`tab_routes`](crate::tab_routes),
+//! mailboxes in [`mailbox_routes`](crate::mailbox_routes), and speed tests
+//! and usage are in [`speed_test`](crate::speed_test) and
 //! [`usage`](crate::usage).
 //!
 //! `mesh_core::protocol` describes the requests; this module checks them and
@@ -27,6 +28,8 @@ use mesh_core::tabs::StoreQuery;
 use mesh_core::{NodeId, PieceId, merkle};
 
 use crate::clock::unix_now;
+use crate::mailbox_routes;
+use crate::mailbox_store::MailboxStore;
 use crate::own_price::OwnPrice;
 use crate::piece_store::{PieceStore, StoreError};
 use crate::pointer_store::{PointerPut, PointerStore, PointerStoreError};
@@ -42,6 +45,9 @@ pub(crate) struct Node {
     pub(crate) store: Arc<PieceStore>,
     pub(crate) pointers: Arc<PointerStore>,
     pub(crate) tabs: Arc<TabBook>,
+    pub(crate) mailboxes: Arc<MailboxStore>,
+    /// The bytes all mailbox messages together may take.
+    pub(crate) mailbox_bytes: u64,
     pub(crate) identity: Arc<NodeIdentity>,
     pub(crate) max_lease_seconds: u64,
     /// The coordinator tokens are spent at, when the node requires them.
@@ -57,8 +63,8 @@ pub(crate) struct Node {
     pub(crate) usage: Arc<UsageCount>,
 }
 
-/// The router of the node with `key`, serving `store`, `pointers` and
-/// `tabs`.
+/// The router of the node with `key`, serving `store`, `pointers`, `tabs`
+/// and `mailboxes`.
 ///
 /// Ids that are not 64 lowercase hex digits and requests without
 /// `lease_seconds` are refused by the extractors with `400 Bad Request` before
@@ -67,6 +73,7 @@ pub fn router(
     store: Arc<PieceStore>,
     pointers: Arc<PointerStore>,
     tabs: Arc<TabBook>,
+    mailboxes: Arc<MailboxStore>,
     key: SigningKey,
     settings: &NodeSettings,
 ) -> Router {
@@ -87,6 +94,8 @@ pub fn router(
         store,
         pointers,
         tabs,
+        mailboxes,
+        mailbox_bytes: settings.mailbox_bytes,
         identity: Arc::new(identity),
         max_lease_seconds: settings.max_lease.as_secs(),
         token_coordinator: settings.require_tokens.clone(),
@@ -104,6 +113,7 @@ pub fn router(
         .route(POINTER_ROUTE, put(put_pointer).get(get_pointer))
         .route(IDENTITY_ROUTE, get(get_identity))
         .merge(tab_routes::routes())
+        .merge(mailbox_routes::routes())
         .merge(speed_test::routes())
         .merge(usage::routes())
         .layer(DefaultBodyLimit::max(MAX_PIECE_BYTES))

@@ -1119,6 +1119,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -1142,6 +1143,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -2004,6 +2006,17 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "x25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e8131a03190127fb2263afc72b322ecadae46b6ff8c6f399ff5d02f5559af6"
+dependencies = [
+ "curve25519-dalek",
+ "rand_core",
+ "zeroize",
+]
 
 [[package]]
 name = "yoke"

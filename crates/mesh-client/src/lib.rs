@@ -31,6 +31,9 @@
 //! mesh, and names its newest one in a pointer ([`commits`]). Each such
 //! [`collection`] has keys of its own, kept in the account's [`index`], so
 //! one collection can be shared without the rest.
+//!
+//! People leave each other small sealed messages in [`mailboxes`] on nodes,
+//! found by a hash of the recipient's key and the week.
 
 pub mod account;
 mod audit;
@@ -44,6 +47,7 @@ pub mod encryption;
 pub mod erasure;
 pub mod index;
 pub mod layout_choice;
+pub mod mailboxes;
 mod manifest;
 pub mod merge;
 mod node_client;

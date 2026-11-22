@@ -16,16 +16,21 @@ pub struct NodeSettings {
     /// only against tabs paid with tokens; when not, it grants leases to
     /// anyone, as a node for testing or a private network does.
     pub require_tokens: Option<String>,
+    /// The bytes all mailbox messages together may take. Mailboxes are free,
+    /// and contact mailboxes need no proof of work, so without a limit anyone
+    /// could fill the node's disk with messages.
+    pub mailbox_bytes: u64,
 }
 
 impl Default for NodeSettings {
     /// 30 days, the design's lease for nodes that are not always online, a
-    /// sweep every minute, and leases without tokens.
+    /// sweep every minute, leases without tokens, and 1 GiB for mailboxes.
     fn default() -> Self {
         NodeSettings {
             max_lease: Duration::from_secs(30 * 24 * 60 * 60),
             sweep_interval: Duration::from_secs(60),
             require_tokens: None,
+            mailbox_bytes: 1 << 30,
         }
     }
 }

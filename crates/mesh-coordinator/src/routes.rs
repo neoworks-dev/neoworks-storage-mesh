@@ -1,6 +1,7 @@
 //! The coordinator's HTTP interface: nodes register and name their operator,
 //! clients fetch the node list and the prices and register chunks for repair
-//! ([`chunk_routes`]), and people sign up and sign in ([`sign_in_routes`]).
+//! ([`chunk_routes`]), people sign up and sign in ([`sign_in_routes`]), and
+//! they find each other's mailbox keys ([`mailbox_key_routes`]).
 
 use std::sync::Arc;
 
@@ -22,6 +23,8 @@ use crate::chunk_book::ChunkBook;
 use crate::chunk_routes;
 use crate::clock::unix_now;
 use crate::earnings::{Earnings, Linked};
+use crate::mailbox_key_routes;
+use crate::mailbox_keys::MailboxKeys;
 use crate::price_book::LatestPrices;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
@@ -42,8 +45,9 @@ pub struct Coordinator {
     /// only the chunks it is responsible for.
     pub chunk_owners: Option<Arc<CoordinatorList>>,
     pub failed_sign_ins: Arc<Mutex<FailedSignIns>>,
+    pub mailbox_keys: Arc<MailboxKeys>,
     pub tokens: Arc<TokenIssuer>,
-    /// The coordinator's key, which signs token keys.
+    /// The coordinator's key, which signs token keys and mailbox keys.
     pub key: SigningKey,
     pub latest: Arc<LatestSnapshot>,
     pub prices: Arc<LatestPrices>,
@@ -66,6 +70,7 @@ pub fn router(coordinator: Coordinator) -> Router {
         .merge(sign_in_routes::routes())
         .merge(token_routes::routes())
         .merge(chunk_routes::routes())
+        .merge(mailbox_key_routes::routes())
         .with_state(coordinator)
 }
 

@@ -23,7 +23,8 @@
 //! and paid ones out of their balance. The coordinator keeps the list of
 //! spent ones, and pays what a node was paid to its operator's balance over
 //! the month, for as long as the node stays up. An account that stops taking
-//! tokens gets warned by email before its data expires. The
+//! tokens gets warned by email before its data expires. Accounts also file
+//! their mailbox key here, so others can look it up by email. The
 //! `mesh-coordinator` binary runs one; tests start coordinators in-process
 //! through [`serve`].
 
@@ -37,6 +38,8 @@ mod coordinator_key;
 mod earnings;
 mod expiry_warnings;
 mod locate;
+mod mailbox_key_routes;
+mod mailbox_keys;
 mod measurements;
 mod price_book;
 mod probe;
@@ -72,6 +75,7 @@ use crate::chunk_book::ChunkBook;
 use crate::earnings::Earnings;
 use crate::expiry_warnings::ExpiryWarnings;
 use crate::locate::Locator;
+use crate::mailbox_keys::MailboxKeys;
 use crate::measurements::Measurements;
 use crate::price_book::PriceBook;
 use crate::registry::Registry;
@@ -94,6 +98,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/chunks.sqlite3        chunks registered for repair
 /// <data>/audits.sqlite3        audit pieces on nodes and challenge results
 /// <data>/accounts.sqlite3      what checking a sign-in needs
+/// <data>/mailbox_keys.sqlite3  mailbox public keys by email
 /// <data>/tokens.sqlite3        token keys, issued counts, spent tokens
 /// <data>/warnings.sqlite3      expiry warnings sent
 /// <data>/outbox/               warning emails for the mail tool to send
@@ -106,6 +111,7 @@ pub struct CoordinatorData {
     chunks: ChunkBook,
     audits: AuditLog,
     accounts: Accounts,
+    mailbox_keys: MailboxKeys,
     tokens: TokenIssuer,
     warnings: ExpiryWarnings,
     key: SigningKey,
@@ -132,6 +138,10 @@ impl CoordinatorData {
             "neoworks-mesh coordinator fake salt key v1",
             &key.to_bytes(),
         );
+        let fake_mailbox_key_secret = blake3::derive_key(
+            "neoworks-mesh coordinator fake mailbox key v1",
+            &key.to_bytes(),
+        );
         Ok(CoordinatorData {
             registry: Registry::open(directory)?,
             measurements: Measurements::open(directory)?,
@@ -140,6 +150,7 @@ impl CoordinatorData {
             chunks: ChunkBook::open(directory)?,
             audits: AuditLog::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
+            mailbox_keys: MailboxKeys::open(directory, fake_mailbox_key_secret)?,
             tokens: TokenIssuer::open(directory)?,
             warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
             key,
@@ -213,6 +224,7 @@ pub async fn serve(
         chunks,
         chunk_owners: settings.coordinators.clone().map(Arc::new),
         failed_sign_ins: Arc::new(Mutex::new(FailedSignIns::new())),
+        mailbox_keys: Arc::new(data.mailbox_keys),
         tokens: tokens.clone(),
         key: data.key.clone(),
         latest: latest.clone(),
