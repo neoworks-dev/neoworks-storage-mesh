@@ -27,6 +27,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// The bytes in each segment; the last segment of a piece may be shorter.
 pub const SEGMENT_BYTES: usize = 4096;
 
+/// The segments one of [`group_hashes`] covers: 16 segments are 64 KiB, so a
+/// node keeping pieces elsewhere reads 64 KiB per segment it proves, and
+/// keeps 32 bytes per 64 KiB of piece, 0.05%, to do so. A power of two, so
+/// groups line up with the tree's pairs.
+pub const GROUP_SEGMENTS: usize = 16;
+
 const LEAF_PREFIX: u8 = 0x00;
 const PARENT_PREFIX: u8 = 0x01;
 const ROOT_PREFIX: u8 = 0x02;
@@ -125,6 +131,77 @@ impl SegmentProof {
     }
 }
 
+/// The hashes of `piece`'s tree at the level where each covers one group of
+/// [`GROUP_SEGMENTS`] segments, the last group perhaps fewer. A piece of one
+/// group or less has one hash, its top hash.
+///
+/// A node that keeps these next to a piece it stores elsewhere can prove any
+/// segment from the bytes of that segment's group alone
+/// ([`prove_in_group`]), instead of reading the whole piece.
+pub fn group_hashes(piece: &[u8]) -> Vec<MerkleHash> {
+    let mut levels = levels_of(piece);
+    let group_level = GROUP_SEGMENTS.trailing_zeros() as usize;
+    if group_level < levels.len() {
+        levels.swap_remove(group_level)
+    } else {
+        // `levels_of` always returns at least one level.
+        levels.pop().unwrap_or_default()
+    }
+}
+
+/// The proof for segment `index` of a piece of `segment_count` segments,
+/// from the piece's [`group_hashes`] and the bytes of the segment's group:
+/// [`GROUP_SEGMENTS`] segments from segment `index / GROUP_SEGMENTS` on,
+/// fewer at the piece's end. `None` when there is no such segment or the
+/// group is not as long as the piece's shape says.
+///
+/// The proof is the same one [`prove`] makes from the whole piece: pairs are
+/// always formed within a group below the group level, so the group's own
+/// tree gives the lower siblings and the group hashes the upper ones.
+pub fn prove_in_group(
+    group_hashes: &[MerkleHash],
+    segment_count: u32,
+    group: &[u8],
+    index: u32,
+) -> Option<SegmentProof> {
+    if index >= segment_count {
+        return None;
+    }
+    let group_number = index as usize / GROUP_SEGMENTS;
+    let first_in_group = group_number * GROUP_SEGMENTS;
+    let segments_in_group = (segment_count as usize - first_in_group).min(GROUP_SEGMENTS);
+    if self::segment_count(group.len()) as usize != segments_in_group {
+        return None;
+    }
+    let offset = index as usize - first_in_group;
+    let mut siblings = siblings_in(&levels_of(group), offset);
+    siblings.extend(siblings_in(
+        &levels_above(group_hashes.to_vec()),
+        group_number,
+    ));
+    let start = offset * SEGMENT_BYTES;
+    let end = (start + SEGMENT_BYTES).min(group.len());
+    Some(SegmentProof {
+        segment_count,
+        index,
+        segment: group.get(start..end)?.to_vec(),
+        siblings,
+    })
+}
+
+/// The siblings of the hash at `position` on the lowest of `levels`, from
+/// there up, skipping levels where it has none.
+fn siblings_in(levels: &[Vec<MerkleHash>], mut position: usize) -> Vec<MerkleHash> {
+    let mut siblings = Vec::new();
+    for level in levels {
+        if let Some(sibling) = level.get(position ^ 1) {
+            siblings.push(*sibling);
+        }
+        position /= 2;
+    }
+    siblings
+}
+
 /// Every level of the tree of `piece`, leaves first, ending with the level of
 /// one hash.
 fn levels_of(piece: &[u8]) -> Vec<Vec<MerkleHash>> {
@@ -132,6 +209,11 @@ fn levels_of(piece: &[u8]) -> Vec<Vec<MerkleHash>> {
     if level.is_empty() {
         level.push(leaf_hash(&[]));
     }
+    levels_above(level)
+}
+
+/// `level` and every level built on it, ending with the level of one hash.
+fn levels_above(level: Vec<MerkleHash>) -> Vec<Vec<MerkleHash>> {
     let mut levels = vec![level];
     while levels.last().is_some_and(|level| level.len() > 1) {
         let below = levels.last().expect("checked by the loop condition");
@@ -268,6 +350,41 @@ mod tests {
 
         assert!(!moved.leads_to(&root));
         assert!(!reshaped.leads_to(&root));
+    }
+
+    #[test]
+    fn a_proof_from_a_group_is_the_proof_from_the_whole_piece() {
+        // One group or less, exactly one, odd numbers of groups with a short
+        // last group, and a full 9 MiB piece.
+        for segments in [1, 2, 9, 16, 17, 33, 47, 80, 2304] {
+            let piece = piece(segments * SEGMENT_BYTES - 5);
+            let count = segment_count(piece.len());
+            let groups = group_hashes(&piece);
+            for index in 0..count {
+                let start = index as usize / GROUP_SEGMENTS * GROUP_SEGMENTS * SEGMENT_BYTES;
+                let end = (start + GROUP_SEGMENTS * SEGMENT_BYTES).min(piece.len());
+                let from_group = prove_in_group(&groups, count, &piece[start..end], index);
+                assert_eq!(
+                    from_group,
+                    prove(&piece, index),
+                    "{segments} segments, segment {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_of_the_wrong_length_proves_nothing() {
+        let piece = piece(40 * SEGMENT_BYTES);
+        let groups = group_hashes(&piece);
+
+        let short = &piece[..15 * SEGMENT_BYTES];
+
+        assert_eq!(prove_in_group(&groups, 40, short, 3), None);
+        assert_eq!(
+            prove_in_group(&groups, 40, &piece[..GROUP_SEGMENTS * SEGMENT_BYTES], 40),
+            None
+        );
     }
 
     #[test]
