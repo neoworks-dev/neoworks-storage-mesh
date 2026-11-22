@@ -16,6 +16,16 @@ pub struct CoordinatorSettings {
     /// clock. Older records are refused, so one captured long ago cannot be
     /// registered again after the node moved.
     pub max_record_age: Duration,
+    /// How often every node's upload bandwidth is measured.
+    pub speed_test_interval: Duration,
+    /// The span a node's bandwidth is the median of its speed tests over.
+    pub bandwidth_window: Duration,
+    /// How long a node must not answer before it counts as lost for good.
+    /// Long enough that a weekend outage does not count; this only feeds the
+    /// loss rate and has nothing to do with when lost pieces are repaired.
+    pub lost_after: Duration,
+    /// The span the loss rate is measured over.
+    pub loss_window: Duration,
     /// The storage tokens each account gets per month; 100 tokens of
     /// 100 MB are 10 GB.
     pub monthly_allowance: u64,
@@ -32,7 +42,9 @@ pub struct CoordinatorSettings {
 
 impl Default for CoordinatorSettings {
     /// A check every five minutes and a snapshot every hour, as the design
-    /// has it; uptime over one day; records at most ten minutes off; 10 GB
+    /// has it; uptime over one day; a speed test every hour, with bandwidth
+    /// over a week; nodes lost after a week of silence, counted over 90
+    /// days; records at most ten minutes off; 10 GB
     /// of tokens per account and month; warnings a week into the month and
     /// three days before the end, looked for every hour.
     fn default() -> Self {
@@ -40,6 +52,10 @@ impl Default for CoordinatorSettings {
             probe_interval: Duration::from_secs(5 * 60),
             publish_interval: Duration::from_secs(60 * 60),
             uptime_window: Duration::from_secs(24 * 60 * 60),
+            speed_test_interval: Duration::from_secs(60 * 60),
+            bandwidth_window: Duration::from_secs(7 * 24 * 60 * 60),
+            lost_after: Duration::from_secs(7 * 24 * 60 * 60),
+            loss_window: Duration::from_secs(90 * 24 * 60 * 60),
             max_record_age: Duration::from_secs(10 * 60),
             monthly_allowance: 100,
             warning_interval: Duration::from_secs(60 * 60),

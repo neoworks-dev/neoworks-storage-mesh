@@ -73,6 +73,9 @@ pub struct ListedNode {
     /// day, in thousandths. An integer, so the snapshot's JSON is the same
     /// on every machine.
     pub uptime_permille: u16,
+    /// The median of the node's recent speed tests, in bits per second, or
+    /// `None` before its first one.
+    pub bandwidth_bits_per_second: Option<u64>,
 }
 
 /// Every node a coordinator knows, at one moment.
@@ -82,6 +85,11 @@ pub struct NodeSnapshot {
     /// they have seen, so an old snapshot cannot be replayed to them.
     pub published_at: u64,
     pub nodes: Vec<ListedNode>,
+    /// The chance that a node is lost for good on any one day, in millionths,
+    /// measured over the nodes the coordinator watched recently; `None` while
+    /// it has watched too little to say. Uptime is not this: a node that is
+    /// offline for an hour still has its pieces.
+    pub daily_loss_per_million: Option<u32>,
 }
 
 impl SignedBody for NodeSnapshot {
@@ -214,7 +222,9 @@ mod tests {
             nodes: vec![ListedNode {
                 record: Signed::sign(&key(1), record(&key(1))),
                 uptime_permille: 990,
+                bandwidth_bits_per_second: None,
             }],
+            daily_loss_per_million: None,
         };
 
         let genuine = Signed::sign(&coordinator, snapshot.clone());

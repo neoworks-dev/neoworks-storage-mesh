@@ -19,6 +19,7 @@ mod pointer_store;
 mod registration;
 mod routes;
 mod settings;
+mod speed_test;
 mod sweep;
 pub mod tab_book;
 mod tab_routes;

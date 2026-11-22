@@ -148,6 +148,7 @@ mod tests {
         ListedNode {
             record: Signed::sign(signer, body),
             uptime_permille,
+            bandwidth_bits_per_second: None,
         }
     }
 
@@ -165,6 +166,7 @@ mod tests {
                 // Signed by node 2 but naming node 3: left out.
                 listed(&key(2), &key(3), 1000),
             ],
+            daily_loss_per_million: None,
         };
 
         let list =

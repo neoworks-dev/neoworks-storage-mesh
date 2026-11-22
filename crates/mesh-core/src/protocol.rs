@@ -29,10 +29,13 @@
 //! - `GET /pointers/{owner}` returns the newest [`Pointer`] the node holds,
 //!   or `404 Not Found`.
 //!
-//! And one about itself:
+//! And two about itself:
 //!
 //! - `GET /identity` returns the node's [`NodeIdentity`]: its id and the
 //!   public key the id is the hash of.
+//! - `GET /speed-test` returns [`SPEED_TEST_BYTES`] bytes that do not
+//!   compress, for coordinators to time, or `429 Too Many Requests` when the
+//!   node has served its share of speed tests for now.
 //!
 //! Storing and renewing both answer with a [`LeaseResponse`] in JSON.
 //! Lease ends are Unix times in seconds on the node's clock; clients send a
@@ -139,6 +142,15 @@ pub fn pointer_path(owner: &[u8; 32]) -> String {
 
 /// The route of a node's identity.
 pub const IDENTITY_ROUTE: &str = "/identity";
+
+/// The route a coordinator downloads to measure a node's upload bandwidth.
+pub const SPEED_TEST_ROUTE: &str = "/speed-test";
+
+/// The size of a speed test. Large enough that a home connection at
+/// 20 Mbit/s takes about three seconds, so the time to set up the connection
+/// barely counts; served once an hour, it costs a node about 6 GB of upload
+/// a month.
+pub const SPEED_TEST_BYTES: usize = 8_000_000;
 
 /// Who a node is: its id and the public key the id is the hash of.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
