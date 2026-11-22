@@ -2,8 +2,10 @@
 //!
 //! The list comes from a coordinator as a signed snapshot
 //! ([`NodeList::fetch`]), checked against the coordinator keys the client
-//! starts with. For a network without a coordinator it can also be a JSON
-//! file the user writes:
+//! starts with. The client keeps the newest snapshot it has accepted
+//! ([`NodeList::fetch_keeping_newest`]), so that nobody can hand it an older
+//! one, and uses it while the coordinator is down. For a network without a
+//! coordinator the list can also be a JSON file the user writes:
 //!
 //! ```json
 //! [
@@ -25,7 +27,12 @@ use mesh_core::protocol::NODE_LIST_ROUTE;
 use mesh_core::signed::Signed;
 use serde::Deserialize;
 
+use crate::index::unix_now;
 use crate::node_client::NodeClient;
+
+/// How far ahead of this device's clock a snapshot may be dated: generous,
+/// since a phone's clock can be minutes off.
+const MAX_CLOCK_AHEAD_SECONDS: u64 = 60 * 60;
 
 /// One node and what placement needs to know about it.
 #[derive(Clone, Debug, Deserialize)]
@@ -70,6 +77,38 @@ pub enum NodeListError {
     Refused(reqwest::StatusCode),
     #[error("the node list is not to be trusted: {0}")]
     Untrusted(#[from] TrustError),
+    #[error(
+        "the coordinator's node list was published at {offered}, before the one kept here \
+         ({kept}); someone may be replaying an old list"
+    )]
+    Older { offered: u64, kept: u64 },
+    #[error(
+        "the coordinator's node list was published at {offered}, ahead of this device's clock \
+         ({now}); check the clock"
+    )]
+    FromTheFuture { offered: u64, now: u64 },
+    #[error("keeping the node list: {0}")]
+    Keep(std::io::Error),
+}
+
+impl NodeListError {
+    /// Whether the coordinator could not be asked or would not answer, as
+    /// opposed to answering with a list that is not to be used.
+    fn is_unreachable(&self) -> bool {
+        matches!(self, NodeListError::Fetch(_) | NodeListError::Refused(_))
+    }
+}
+
+/// A node list from a coordinator, or the kept one when the coordinator could
+/// not be reached.
+#[derive(Debug)]
+pub struct FetchedNodeList {
+    pub list: NodeList,
+    /// When the coordinator published the list, in Unix seconds.
+    pub published_at: u64,
+    /// Why the coordinator was not asked successfully, when the kept list is
+    /// used instead.
+    pub unreachable: Option<NodeListError>,
 }
 
 impl NodeList {
@@ -86,14 +125,43 @@ impl NodeList {
         coordinator: &str,
         coordinators: &CoordinatorList,
     ) -> Result<(NodeList, u64), NodeListError> {
-        let url = format!("{}{NODE_LIST_ROUTE}", coordinator.trim_end_matches('/'));
-        let response = client.http().get(url).send().await?;
-        if !response.status().is_success() {
-            return Err(NodeListError::Refused(response.status()));
-        }
-        let snapshot: Signed<NodeSnapshot> = serde_json::from_slice(&response.bytes().await?)?;
+        let snapshot = fetch_snapshot(client, coordinator).await?;
         let list = NodeList::from_snapshot(&snapshot, coordinators)?;
         Ok((list, snapshot.body.published_at))
+    }
+
+    /// Like [`NodeList::fetch`], but keeps the newest snapshot accepted so far
+    /// in the file `kept_path`. A snapshot published before the kept one is
+    /// refused, and when the coordinator cannot be reached, the kept one is
+    /// used.
+    ///
+    /// Without this, whoever sits between client and coordinator could serve
+    /// an old snapshot that still carries a valid signature, such as one from
+    /// before a malicious node was dropped.
+    pub async fn fetch_keeping_newest(
+        client: &NodeClient,
+        coordinator: &str,
+        coordinators: &CoordinatorList,
+        kept_path: &Path,
+    ) -> Result<FetchedNodeList, NodeListError> {
+        let kept = read_kept(kept_path, coordinators)?;
+        let snapshot = match fetch_snapshot(client, coordinator).await {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.is_unreachable() => return fall_back(kept, coordinators, error),
+            Err(error) => return Err(error),
+        };
+        let list = NodeList::from_snapshot(&snapshot, coordinators)?;
+        let offered = snapshot.body.published_at;
+        let kept_at = kept.map(|kept| kept.body.published_at);
+        check_date(offered, kept_at, unix_now())?;
+        if kept_at != Some(offered) {
+            write_kept(kept_path, &snapshot).map_err(NodeListError::Keep)?;
+        }
+        Ok(FetchedNodeList {
+            list,
+            published_at: offered,
+            unreachable: None,
+        })
     }
 
     /// The nodes in `snapshot`, once a coordinator on `coordinators` is found
@@ -122,6 +190,78 @@ impl NodeList {
             .collect();
         Ok(NodeList { nodes })
     }
+}
+
+/// The newest snapshot the coordinator at `coordinator` has published, not
+/// yet checked.
+async fn fetch_snapshot(
+    client: &NodeClient,
+    coordinator: &str,
+) -> Result<Signed<NodeSnapshot>, NodeListError> {
+    let url = format!("{}{NODE_LIST_ROUTE}", coordinator.trim_end_matches('/'));
+    let response = client.http().get(url).send().await?;
+    if !response.status().is_success() {
+        return Err(NodeListError::Refused(response.status()));
+    }
+    Ok(serde_json::from_slice(&response.bytes().await?)?)
+}
+
+/// Checks that a snapshot published at `offered` may replace the one kept
+/// from `kept_at`, at `now`.
+fn check_date(offered: u64, kept_at: Option<u64>, now: u64) -> Result<(), NodeListError> {
+    if let Some(kept) = kept_at.filter(|&kept| offered < kept) {
+        return Err(NodeListError::Older { offered, kept });
+    }
+    // A snapshot dated far ahead would be kept and make every real one look
+    // old, so one stolen coordinator key could freeze the client's list.
+    if offered > now + MAX_CLOCK_AHEAD_SECONDS {
+        return Err(NodeListError::FromTheFuture { offered, now });
+    }
+    Ok(())
+}
+
+/// The list in the `kept` snapshot, used because the coordinator could not be
+/// reached for `error`; the error itself when nothing is kept.
+fn fall_back(
+    kept: Option<Signed<NodeSnapshot>>,
+    coordinators: &CoordinatorList,
+    error: NodeListError,
+) -> Result<FetchedNodeList, NodeListError> {
+    let Some(kept) = kept else {
+        return Err(error);
+    };
+    Ok(FetchedNodeList {
+        list: NodeList::from_snapshot(&kept, coordinators)?,
+        published_at: kept.body.published_at,
+        unreachable: Some(error),
+    })
+}
+
+/// The snapshot kept in `path` while a coordinator on `coordinators` vouches
+/// for it, or `None`.
+fn read_kept(
+    path: &Path,
+    coordinators: &CoordinatorList,
+) -> Result<Option<Signed<NodeSnapshot>>, NodeListError> {
+    let json = match std::fs::read(path) {
+        Ok(json) => json,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(NodeListError::Keep(error)),
+    };
+    let kept: Signed<NodeSnapshot> = serde_json::from_slice(&json)?;
+    // A snapshot from a coordinator since dropped from the list is forgotten.
+    // Otherwise one signed with a key dropped for being stolen could keep
+    // refusing every real snapshot.
+    Ok(coordinators.check_snapshot(&kept).is_ok().then_some(kept))
+}
+
+/// Keeps `snapshot` in `path`, through a temporary file so that a client
+/// stopped mid-write still has the snapshot it kept before.
+fn write_kept(path: &Path, snapshot: &Signed<NodeSnapshot>) -> std::io::Result<()> {
+    let json = serde_json::to_vec(snapshot)?;
+    let temporary_path = path.with_extension("partial");
+    std::fs::write(&temporary_path, json)?;
+    std::fs::rename(&temporary_path, path)
 }
 
 #[cfg(test)]
@@ -178,5 +318,34 @@ mod tests {
             NodeId::of(&key(1).verifying_key().to_bytes())
         );
         assert_eq!(list.nodes[0].weight, 0.9);
+    }
+
+    #[test]
+    fn a_snapshot_as_new_as_the_kept_one_or_newer_replaces_it() {
+        assert!(check_date(500, None, 1_000).is_ok());
+        assert!(check_date(500, Some(500), 1_000).is_ok());
+        assert!(check_date(600, Some(500), 1_000).is_ok());
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_kept_one_is_refused() {
+        assert!(matches!(
+            check_date(400, Some(500), 1_000),
+            Err(NodeListError::Older {
+                offered: 400,
+                kept: 500
+            })
+        ));
+    }
+
+    #[test]
+    fn a_snapshot_dated_far_ahead_of_the_clock_is_refused() {
+        let now = 1_000;
+
+        assert!(check_date(now + MAX_CLOCK_AHEAD_SECONDS, None, now).is_ok());
+        assert!(matches!(
+            check_date(now + MAX_CLOCK_AHEAD_SECONDS + 1, None, now),
+            Err(NodeListError::FromTheFuture { .. })
+        ));
     }
 }

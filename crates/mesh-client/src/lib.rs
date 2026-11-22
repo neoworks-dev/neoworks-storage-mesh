@@ -57,7 +57,7 @@ pub use download::{CHUNKS_IN_FLIGHT, DownloadError, download};
 pub use encryption::DedupKey;
 pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
 pub use node_client::{NodeClient, NodeRequestError, PointerStored};
-pub use node_list::{NodeInfo, NodeList, NodeListError};
+pub use node_list::{FetchedNodeList, NodeInfo, NodeList, NodeListError};
 pub use renew::{RenewReport, renew};
 pub use repair::{ChunkRepair, REPAIR_AT, RepairReport, repair};
 pub use upload::{UploadError, upload};

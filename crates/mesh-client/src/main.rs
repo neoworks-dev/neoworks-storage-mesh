@@ -19,6 +19,10 @@
 //! { "version": 1, "keys": ["5c0f…"] }
 //! ```
 //!
+//! The newest node list accepted from a coordinator is kept in
+//! `mesh-node-list.json` (`--kept-node-list`). An older one is refused, and
+//! while the coordinator cannot be reached, the kept one is used.
+//!
 //! The manifest holds the chunk keys: anyone with it can read the file. `put`
 //! derives those keys from a dedup key kept in `mesh.key`, which it creates
 //! on first use; until there are accounts, that file is what makes the same
@@ -124,10 +128,22 @@ enum Command {
     },
 }
 
+/// Where the nodes to choose from come from, and where the newest list from
+/// a coordinator is kept.
+#[derive(Args)]
+struct NodeListArguments {
+    #[command(flatten)]
+    source: NodeListSource,
+    /// Where the newest node list accepted from a coordinator is kept, to
+    /// refuse older ones and to use while the coordinator is down.
+    #[arg(long, default_value = "mesh-node-list.json")]
+    kept_node_list: PathBuf,
+}
+
 /// Where the nodes to choose from come from: a file, or a coordinator.
 #[derive(Args)]
 #[group(required = true, multiple = true)]
-struct NodeListArguments {
+struct NodeListSource {
     /// A JSON list of nodes to choose from.
     #[arg(long, conflicts_with = "coordinator")]
     nodes: Option<PathBuf>,
@@ -203,12 +219,12 @@ async fn load_node_list(
     client: &NodeClient,
     arguments: &NodeListArguments,
 ) -> anyhow::Result<NodeList> {
-    if let Some(path) = &arguments.nodes {
+    let source = &arguments.source;
+    if let Some(path) = &source.nodes {
         return NodeList::read(path).with_context(|| format!("reading {}", path.display()));
     }
     // clap requires either `--nodes` or both of these.
-    let (Some(coordinator), Some(coordinators_path)) =
-        (&arguments.coordinator, &arguments.coordinators)
+    let (Some(coordinator), Some(coordinators_path)) = (&source.coordinator, &source.coordinators)
     else {
         anyhow::bail!("give --nodes, or --coordinator with --coordinators");
     };
@@ -216,12 +232,24 @@ async fn load_node_list(
         .with_context(|| format!("reading {}", coordinators_path.display()))?;
     let coordinators: CoordinatorList = serde_json::from_slice(&json)
         .with_context(|| format!("parsing {}", coordinators_path.display()))?;
-    let (list, published_at) = NodeList::fetch(client, coordinator, &coordinators).await?;
-    println!(
-        "{} nodes from {coordinator}, published at {published_at}",
-        list.nodes.len()
-    );
-    Ok(list)
+    let kept_path = &arguments.kept_node_list;
+    let fetched = NodeList::fetch_keeping_newest(client, coordinator, &coordinators, kept_path)
+        .await
+        .with_context(|| {
+            let kept = kept_path.display();
+            format!("node list from {coordinator}, newest kept in {kept}")
+        })?;
+    let count = fetched.list.nodes.len();
+    let published_at = fetched.published_at;
+    match &fetched.unreachable {
+        None => println!("{count} nodes from {coordinator}, published at {published_at}"),
+        Some(error) => println!(
+            "{coordinator} could not be reached ({error}); using the {count} nodes kept in {}, \
+             published at {published_at}",
+            kept_path.display()
+        ),
+    }
+    Ok(fetched.list)
 }
 
 async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()> {
