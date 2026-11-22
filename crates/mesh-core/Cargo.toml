@@ -1,0 +1,14 @@
+[package]
+name = "mesh-core"
+version = "0.1.0"
+description = "Types shared by every role in the NeoWorks storage mesh"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+blake3.workspace = true
+hex.workspace = true
+serde.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "mesh-node"
+version = "0.1.0"
+description = "A storage node: keeps opaque pieces by their hash and hands them back"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+mesh-core.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
