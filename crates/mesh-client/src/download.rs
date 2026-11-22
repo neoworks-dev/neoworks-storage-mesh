@@ -9,7 +9,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::encryption::open;
-use crate::erasure::{DATA_PIECES, RebuildError, rebuild};
+use crate::erasure::{RebuildError, rebuild};
 use crate::manifest::{ChunkRecord, Manifest, PlacedPiece};
 use crate::node_client::NodeClient;
 use crate::node_latency::LatencyTable;
@@ -42,7 +42,8 @@ pub enum DownloadError {
 /// [`CHUNKS_IN_FLIGHT`] chunks at once and writing them in order, so the file
 /// never has to fit in memory.
 ///
-/// A chunk survives as long as four of its six pieces can be fetched. Nodes
+/// A chunk survives as long as as many of its pieces as it has data pieces
+/// can be fetched, four of six in the default layout. Nodes
 /// that are down, have lost a piece or return wrong bytes all count the same:
 /// that piece is missing.
 ///
@@ -89,8 +90,8 @@ async fn fetch_chunk(
 ) -> Result<Vec<u8>, DownloadError> {
     // The manifest was written by `upload`, which numbers chunks with a u32.
     let index = u32::try_from(index).expect("chunk indexes fit a u32");
-    let pieces = fetch_pieces(client, list, &chunk.pieces).await;
-    let sealed = rebuild(&pieces, chunk.sealed_len as usize)
+    let pieces = fetch_pieces(client, list, &chunk.pieces, chunk.layout.data()).await;
+    let sealed = rebuild(&pieces, chunk.sealed_len as usize, chunk.layout)
         .map_err(|source| DownloadError::Rebuild { index, source })?;
     let mut plaintext = open(&chunk.key, &sealed).map_err(|_| DownloadError::Open { index })?;
     // Chunks stored before padding was dropped open with zeros after their
@@ -100,17 +101,18 @@ async fn fetch_chunk(
     Ok(plaintext)
 }
 
-/// Fetches the first [`DATA_PIECES`] valid pieces of a chunk; every other
-/// piece is `None`.
+/// Fetches the first `needed` valid pieces of a chunk, as many as it has data
+/// pieces; every other piece is `None`.
 ///
-/// It asks the [`DATA_PIECES`] nodes that answered fastest last time, and
-/// one more node each time a piece fails or nothing arrives for
-/// [`HEDGE_DELAY`]. Requests still running once enough pieces are in are
-/// dropped, which cancels them.
+/// It asks the `needed` nodes that answered fastest last time, and one more
+/// node each time a piece fails or nothing arrives for [`HEDGE_DELAY`].
+/// Requests still running once enough pieces are in are dropped, which
+/// cancels them.
 async fn fetch_pieces(
     client: &NodeClient,
     list: &NodeList,
     pieces: &[PlacedPiece],
+    needed: usize,
 ) -> Vec<Option<Vec<u8>>> {
     let urls: Vec<Option<&str>> = pieces
         .iter()
@@ -118,12 +120,12 @@ async fn fetch_pieces(
         .collect();
     let mut not_asked = fastest_first(client.latencies(), &urls).into_iter();
     let mut running = FuturesUnordered::new();
-    for index in not_asked.by_ref().take(DATA_PIECES) {
+    for index in not_asked.by_ref().take(needed) {
         running.push(fetch_piece(client, pieces, &urls, index));
     }
     let mut found = vec![None; pieces.len()];
     let mut arrived = 0;
-    while arrived < DATA_PIECES {
+    while arrived < needed {
         let answer = match timeout(HEDGE_DELAY, running.next()).await {
             Ok(Some(answer)) => Some(answer),
             // Every node has been asked and every request has ended.

@@ -219,6 +219,7 @@ pub fn node_list<'a>(nodes: impl IntoIterator<Item = &'a TestNode>) -> NodeList 
             url: node.url.clone(),
             operator: format!("operator-{index}"),
             network: format!("network-{index}"),
+            region: None,
             weight: 1.0,
         })
         .collect();

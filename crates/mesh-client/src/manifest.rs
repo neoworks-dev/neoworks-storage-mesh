@@ -1,7 +1,7 @@
 //! The manifest: everything needed to get a stored file back.
 //!
-//! It holds, for every chunk, the chunk's key and which piece is on which
-//! node. Whoever has the manifest can read the file and nobody else can, so it
+//! It holds, for every chunk, the chunk's key, how it is cut into pieces and
+//! which piece is on which node. Whoever has the manifest can read the file and nobody else can, so it
 //! stays with the owner. Storing manifests in the mesh itself, encrypted,
 //! comes with the index (#10).
 //!
@@ -9,11 +9,13 @@
 //! or in two versions of one, is stored once. Each file's renewals keep the
 //! shared pieces alive, so deleting one file leaves the other whole.
 
+use mesh_core::layout::Layout;
 use mesh_core::merkle::MerkleHash;
 use mesh_core::{NodeId, PieceId};
 use serde::{Deserialize, Serialize};
 
 use crate::encryption::ChunkKey;
+use crate::placement::Spread;
 
 /// How to find and open one stored file.
 #[derive(Clone, Serialize, Deserialize)]
@@ -35,8 +37,30 @@ pub struct ChunkRecord {
     /// The sealed chunk's length, which the zeros filling the last data piece
     /// would otherwise hide.
     pub sealed_len: u32,
+    /// How the chunk is cut. Chunks stored before layouts were chosen per
+    /// file have none recorded and are 4 + 2.
+    #[serde(default)]
+    pub layout: Layout,
+    /// The fewest regions the chunk's pieces spread over, which repair keeps
+    /// to; 1, the layout's own limit per region, for chunks stored before.
+    #[serde(default = "one_region")]
+    pub regions: u8,
     /// The chunk's pieces in coding order: data pieces first, then parity.
     pub pieces: Vec<PlacedPiece>,
+}
+
+fn one_region() -> u8 {
+    1
+}
+
+impl ChunkRecord {
+    /// How the chunk was cut and spread, which repair keeps to.
+    pub fn spread(&self) -> Spread {
+        Spread {
+            layout: self.layout,
+            regions: usize::from(self.regions),
+        }
+    }
 }
 
 /// One piece and the node holding it.
@@ -50,4 +74,23 @@ pub struct PlacedPiece {
     /// The id of the node holding it. Its address is looked up in the node
     /// list when needed, so a node that moves keeps its pieces.
     pub node: NodeId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chunk_recorded_before_layouts_is_four_plus_two_in_one_region() {
+        let json = serde_json::json!({
+            "key": "00".repeat(32),
+            "plain_len": 10,
+            "sealed_len": 26,
+            "pieces": [],
+        });
+
+        let chunk: ChunkRecord = serde_json::from_value(json).unwrap();
+
+        assert_eq!(chunk.spread(), Spread::DEFAULT);
+    }
 }

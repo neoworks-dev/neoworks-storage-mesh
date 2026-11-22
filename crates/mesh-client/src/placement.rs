@@ -1,14 +1,15 @@
 //! Choosing which nodes get the pieces of a chunk, and storing them there.
 //!
-//! A chunk survives the loss of [`PARITY_PIECES`] pieces, so no single thing
-//! that can fail must ever hold more than that many. The rules below are hard:
-//! a node that breaks one is never chosen, however few nodes are left.
+//! A chunk survives the loss of as many pieces as its layout has parity
+//! pieces, so no single thing that can fail must ever hold more than that
+//! many ([`Limits`]). The rules below are hard: a node that breaks one is
+//! never chosen, however few nodes are left.
 //!
 //! - One piece per node.
 //! - At most one piece per IPv4 /24 or IPv6 /48, the usual size of one
 //!   provider's block of addresses in one place.
-//! - At most [`MAX_PER_OPERATOR`] pieces per operator and
-//!   [`MAX_PER_NETWORK`] per network.
+//! - At most `parity` pieces per operator, per network and per region. A
+//!   node whose region is unknown is a region of its own.
 //!
 //! Among the nodes the rules allow, the choice is random, weighted by each
 //! node's weight. Choosing the best nodes first would let an attacker predict
@@ -18,24 +19,79 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use futures::future::join_all;
+use mesh_core::layout::Layout;
 use mesh_core::{NodeId, PieceId, merkle};
 use reqwest::Url;
 
-use crate::erasure::PARITY_PIECES;
 use crate::manifest::PlacedPiece;
 use crate::node_client::NodeClient;
 use crate::node_list::{NodeInfo, NodeList};
 use crate::random::random_unit;
 
-/// The most pieces of one chunk a single operator may hold: as many as the
-/// chunk can lose.
-pub const MAX_PER_OPERATOR: usize = PARITY_PIECES;
+/// How many pieces of one chunk may share an operator, a network or a region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub per_operator: usize,
+    pub per_network: usize,
+    pub per_region: usize,
+}
 
-/// The most pieces of one chunk that may be reached through one network.
-pub const MAX_PER_NETWORK: usize = PARITY_PIECES;
+impl Limits {
+    /// The limits of the default layout, 4 + 2: two pieces per operator,
+    /// network and region.
+    pub const DEFAULT: Limits = Limits::for_layout(Layout::DEFAULT, 1);
 
-/// Chooses up to `count` nodes from `list` for pieces of one chunk; fewer
-/// when the rules allow no more.
+    /// The limits for a chunk of `layout` spread over at least `regions`
+    /// regions: as many pieces per operator, network and region as the chunk
+    /// can lose, and per region few enough that the pieces fill at least
+    /// `regions` regions.
+    pub const fn for_layout(layout: Layout, regions: usize) -> Limits {
+        let per_group = layout.max_per_group();
+        // With at most `k` pieces per region, `total` pieces fill at least
+        // `total / k` regions, rounded up; `k = (total - 1) / (regions - 1)`
+        // is the largest `k` that keeps that at `regions` or more.
+        let spread_cap = if regions <= 1 {
+            per_group
+        } else {
+            (layout.total() - 1) / (regions - 1)
+        };
+        let per_region = if spread_cap < per_group {
+            spread_cap
+        } else {
+            per_group
+        };
+        Limits {
+            per_operator: per_group,
+            per_network: per_group,
+            per_region: if per_region == 0 { 1 } else { per_region },
+        }
+    }
+}
+
+/// How a chunk is cut and how far apart its pieces go: its layout, and the
+/// fewest regions its pieces spread over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spread {
+    pub layout: Layout,
+    pub regions: usize,
+}
+
+impl Spread {
+    /// The default layout, 4 + 2, with no more than its two-piece limit per
+    /// region.
+    pub const DEFAULT: Spread = Spread {
+        layout: Layout::DEFAULT,
+        regions: 1,
+    };
+
+    /// The placement limits of this spread.
+    pub const fn limits(self) -> Limits {
+        Limits::for_layout(self.layout, self.regions)
+    }
+}
+
+/// Chooses up to `count` nodes from `list` for pieces of one chunk within
+/// `limits`; fewer when the rules allow no more.
 ///
 /// `holding` are the ids of the nodes that already hold pieces of the chunk;
 /// the new nodes have to fit the rules together with those still in the list.
@@ -46,6 +102,7 @@ pub fn choose<'list>(
     count: usize,
     holding: &[NodeId],
     excluded: &[NodeId],
+    limits: Limits,
 ) -> Vec<&'list NodeInfo> {
     let mut chosen: Vec<&NodeInfo> = holding
         .iter()
@@ -60,7 +117,7 @@ pub fn choose<'list>(
         .filter(|node| !excluded.contains(&node.id))
         .collect();
     while chosen.len() - first_new < count {
-        candidates.retain(|candidate| fits(candidate, &chosen));
+        candidates.retain(|candidate| fits(candidate, &chosen, limits));
         let Some(index) = weighted_pick(&candidates) else {
             break;
         };
@@ -69,9 +126,9 @@ pub fn choose<'list>(
     chosen.split_off(first_new)
 }
 
-/// Stores each of `pieces` of one chunk on a node chosen from `list` for
-/// `lease`, and returns where each went: `None` for a piece no allowed node
-/// took.
+/// Stores each of `pieces` of one chunk on a node chosen from `list` within
+/// `limits` for `lease`, and returns where each went: `None` for a piece no
+/// allowed node took.
 ///
 /// A node that refuses or can't be reached is not asked again, and its piece
 /// goes to another node in the next round. Every round places or rules out at
@@ -82,6 +139,7 @@ pub async fn store_pieces(
     pieces: &[Vec<u8>],
     holding: &[NodeId],
     excluded: &[NodeId],
+    limits: Limits,
     lease: Duration,
 ) -> Vec<Option<PlacedPiece>> {
     let mut placed: Vec<Option<PlacedPiece>> = vec![None; pieces.len()];
@@ -90,7 +148,7 @@ pub async fn store_pieces(
         let waiting: Vec<usize> = (0..pieces.len()).filter(|&i| placed[i].is_none()).collect();
         let mut holding_now: Vec<NodeId> = holding.to_vec();
         holding_now.extend(placed.iter().flatten().map(|piece| piece.node));
-        let nodes = choose(list, waiting.len(), &holding_now, &excluded);
+        let nodes = choose(list, waiting.len(), &holding_now, &excluded, limits);
         if nodes.is_empty() {
             return placed;
         }
@@ -130,8 +188,8 @@ async fn store_one(
 }
 
 /// Whether `candidate` may hold a piece of a chunk whose pieces are on
-/// `chosen`. Pointers spread their copies by the same rules.
-pub(crate) fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo]) -> bool {
+/// `chosen`, within `limits`. Pointers spread their copies by the same rules.
+pub(crate) fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo], limits: Limits) -> bool {
     let same_operator = chosen
         .iter()
         .filter(|node| node.operator == candidate.operator)
@@ -140,15 +198,38 @@ pub(crate) fn fits(candidate: &NodeInfo, chosen: &[&NodeInfo]) -> bool {
         .iter()
         .filter(|node| node.network == candidate.network)
         .count();
+    // An unknown region is a region of its own, so it never counts against
+    // another node's.
+    let same_region = match &candidate.region {
+        Some(region) => chosen
+            .iter()
+            .filter(|node| node.region.as_ref() == Some(region))
+            .count(),
+        None => 0,
+    };
     let candidate_subnet = subnet_of(&candidate.url);
     let same_subnet = candidate_subnet.is_some()
         && chosen
             .iter()
             .any(|node| subnet_of(&node.url) == candidate_subnet);
     chosen.iter().all(|node| node.id != candidate.id)
-        && same_operator < MAX_PER_OPERATOR
-        && same_network < MAX_PER_NETWORK
+        && same_operator < limits.per_operator
+        && same_network < limits.per_network
+        && same_region < limits.per_region
         && !same_subnet
+}
+
+/// Whether `list` has enough nodes to place all pieces of a chunk of
+/// `layout` within `limits`, taking nodes in turn rather than at random so
+/// the answer doesn't change from one call to the next.
+pub fn can_place(list: &NodeList, layout: Layout, limits: Limits) -> bool {
+    let mut chosen: Vec<&NodeInfo> = Vec::new();
+    for node in list.nodes.iter().filter(|node| node.weight > 0.0) {
+        if fits(node, &chosen, limits) {
+            chosen.push(node);
+        }
+    }
+    chosen.len() >= layout.total()
 }
 
 /// The /24 or /48 of a node's address, or `None` when the rule can't apply.
@@ -205,8 +286,59 @@ mod tests {
             url: url.to_string(),
             operator: operator.to_string(),
             network: network.to_string(),
+            region: None,
             weight: 1.0,
         }
+    }
+
+    /// Nine nodes of distinct operators, networks and subnets, three in each
+    /// of three regions.
+    fn three_regions() -> NodeList {
+        let nodes = (0..9)
+            .map(|index| {
+                let mut info = node(
+                    &format!("http://10.0.{index}.1:7001"),
+                    &format!("operator-{index}"),
+                    &format!("network-{index}"),
+                );
+                info.region = Some(format!("region-{}", index / 3));
+                info
+            })
+            .collect();
+        NodeList { nodes }
+    }
+
+    #[test]
+    fn a_region_holds_no_more_than_the_chunk_can_lose() {
+        let list = three_regions();
+
+        for _ in 0..100 {
+            let chosen = choose(&list, 6, &[], &[], Limits::DEFAULT);
+            assert_eq!(chosen.len(), 6);
+            for region in 0..3 {
+                let name = Some(format!("region-{region}"));
+                let count = chosen.iter().filter(|node| node.region == name).count();
+                assert_eq!(count, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn spreading_over_more_regions_lowers_the_share_of_each() {
+        let layout = Layout::new(4, 6).unwrap();
+
+        assert_eq!(Limits::for_layout(layout, 1).per_region, 6);
+        assert_eq!(Limits::for_layout(layout, 3).per_region, 4);
+        assert_eq!(Limits::for_layout(layout, 3).per_operator, 6);
+    }
+
+    #[test]
+    fn a_layout_is_placeable_only_with_enough_independent_nodes() {
+        let list = three_regions();
+
+        assert!(can_place(&list, Layout::DEFAULT, Limits::DEFAULT));
+        let wide = Layout::new(6, 2).unwrap();
+        assert!(!can_place(&list, wide, Limits::for_layout(wide, 1)));
     }
 
     /// Eight nodes: four operators with two nodes each, all in different
@@ -232,7 +364,7 @@ mod tests {
     fn chooses_distinct_nodes_within_the_operator_limit() {
         let list = diverse_list();
         for _ in 0..100 {
-            let chosen = choose(&list, 6, &[], &[]);
+            let chosen = choose(&list, 6, &[], &[], Limits::DEFAULT);
             let mut chosen_urls = urls(&chosen);
             chosen_urls.sort();
             chosen_urls.dedup();
@@ -240,7 +372,7 @@ mod tests {
             for operator in 0..4 {
                 let name = format!("operator-{operator}");
                 let count = chosen.iter().filter(|node| node.operator == name).count();
-                assert!(count <= MAX_PER_OPERATOR);
+                assert!(count <= Limits::DEFAULT.per_operator);
             }
         }
     }
@@ -258,9 +390,9 @@ mod tests {
             .collect();
         let list = NodeList { nodes };
 
-        let chosen = choose(&list, 6, &[], &[]);
+        let chosen = choose(&list, 6, &[], &[], Limits::DEFAULT);
 
-        assert_eq!(chosen.len(), MAX_PER_OPERATOR);
+        assert_eq!(chosen.len(), Limits::DEFAULT.per_operator);
     }
 
     #[test]
@@ -276,7 +408,7 @@ mod tests {
             .collect();
         let list = NodeList { nodes };
 
-        let chosen = choose(&list, 2, &[], &[]);
+        let chosen = choose(&list, 2, &[], &[], Limits::DEFAULT);
 
         assert_eq!(chosen.len(), 1);
     }
@@ -288,7 +420,7 @@ mod tests {
         let holding = [list.nodes[0].id, list.nodes[1].id];
 
         for _ in 0..100 {
-            let chosen = choose(&list, 2, &holding, &[]);
+            let chosen = choose(&list, 2, &holding, &[], Limits::DEFAULT);
             assert_eq!(chosen.len(), 2);
             assert!(chosen.iter().all(|node| node.operator != "operator-0"));
         }
@@ -300,7 +432,8 @@ mod tests {
         list.nodes[3].weight = 0.0;
 
         for _ in 0..100 {
-            let chosen_urls = urls(&choose(&list, 4, &[], &[list.nodes[5].id]));
+            let excluded = [list.nodes[5].id];
+            let chosen_urls = urls(&choose(&list, 4, &[], &excluded, Limits::DEFAULT));
             assert!(!chosen_urls.contains(&"http://10.0.3.1:7001".to_string()));
             assert!(!chosen_urls.contains(&"http://10.0.5.1:7001".to_string()));
         }
@@ -314,7 +447,7 @@ mod tests {
         let mut light = 0;
 
         for _ in 0..1_000 {
-            match choose(&list, 1, &[], &[])[0].url.as_str() {
+            match choose(&list, 1, &[], &[], Limits::DEFAULT)[0].url.as_str() {
                 "http://10.0.0.1:7001" => heavy += 1,
                 "http://10.0.1.1:7001" => light += 1,
                 _ => {}

@@ -26,13 +26,21 @@ use mesh_core::pointer::Pointer;
 
 use crate::node_client::{NodeClient, PointerStored};
 use crate::node_list::{NodeInfo, NodeList};
-use crate::placement::fits;
+use crate::placement::{Limits, fits};
 
 /// How many nodes hold each pointer. A pointer is a few KB, so copies are
 /// cheap, and any one of them is enough to find the newest version.
 pub const POINTER_COPIES: usize = 10;
 
 const PLACEMENT_CONTEXT: &[u8] = b"neoworks-mesh pointer placement v1";
+
+/// The limits pointer copies spread by: those of a chunk's pieces per
+/// operator and network, but none per region. Any one copy is enough, so a
+/// network in a single country should still hold all ten.
+const POINTER_LIMITS: Limits = Limits {
+    per_region: POINTER_COPIES,
+    ..Limits::DEFAULT
+};
 
 /// The nodes that hold `owner`'s pointer, highest score first.
 pub fn pointer_nodes<'list>(owner: &[u8; 32], list: &'list NodeList) -> Vec<&'list NodeInfo> {
@@ -43,7 +51,7 @@ pub fn pointer_nodes<'list>(owner: &[u8; 32], list: &'list NodeList) -> Vec<&'li
         if chosen.len() == POINTER_COPIES {
             break;
         }
-        if fits(node, &chosen) {
+        if fits(node, &chosen, POINTER_LIMITS) {
             chosen.push(node);
         }
     }
@@ -224,6 +232,7 @@ mod tests {
                 url: format!("http://127.0.0.1:{}", 7000 + u16::from(index)),
                 operator: format!("operator-{index}"),
                 network: format!("network-{index}"),
+                region: None,
                 weight: 1.0,
             })
             .collect();
@@ -277,6 +286,6 @@ mod tests {
 
         let chosen = pointer_nodes(&[1; 32], &list);
 
-        assert_eq!(chosen.len(), crate::placement::MAX_PER_OPERATOR);
+        assert_eq!(chosen.len(), Limits::DEFAULT.per_operator);
     }
 }

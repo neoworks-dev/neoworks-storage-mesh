@@ -193,7 +193,7 @@ async fn nodes_missing_from_the_list_count_as_down() {
     assert!(matches!(
         read_from_three,
         Err(DownloadError::Rebuild {
-            source: RebuildError::TooFewPieces { found: 3 },
+            source: RebuildError::TooFewPieces { found: 3, .. },
             ..
         })
     ));
@@ -217,6 +217,7 @@ async fn a_node_that_never_answers_is_passed_over_and_remembered() {
         url: start_silent_node().await,
         operator: "silent".into(),
         network: "silent".into(),
+        region: None,
         weight: 1.0,
     };
     for chunk in &mut manifest.chunks {
@@ -254,7 +255,10 @@ async fn fails_when_three_nodes_are_down() {
         result,
         Err(DownloadError::Rebuild {
             index: 0,
-            source: RebuildError::TooFewPieces { found: 3 }
+            source: RebuildError::TooFewPieces {
+                found: 3,
+                needed: 4
+            }
         })
     ));
 }
@@ -335,7 +339,8 @@ async fn fails_with_fewer_nodes_than_pieces() {
         result,
         Err(UploadError::NotEnoughNodes {
             chunk: 0,
-            placed: 5
+            placed: 5,
+            needed: 6
         })
     ));
 }

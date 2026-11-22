@@ -27,7 +27,6 @@ use crate::account::Account;
 use crate::batch_renew::{BatchRenewal, renew_pieces};
 use crate::collection::{Collection, CollectionError, CollectionKeys, Writer};
 use crate::commits::{FetchCommitError, PublishHeadError, ReadHeadError};
-use crate::erasure::DATA_PIECES;
 use crate::manifest::Manifest;
 use crate::node_client::NodeClient;
 use crate::node_list::NodeList;
@@ -279,8 +278,9 @@ impl Index {
 pub struct IndexRenewal {
     pub pieces_renewed: usize,
     pub pieces_not_renewed: usize,
-    /// Files with a chunk that has fewer than four renewed pieces. They are
-    /// unreadable from their old `renew_by` on unless repaired first.
+    /// Files with a chunk that has fewer renewed pieces than data pieces.
+    /// They are unreadable from their old `renew_by` on unless repaired
+    /// first.
     pub at_risk: Vec<IndexedFile>,
 }
 
@@ -292,7 +292,7 @@ fn is_readable(manifest: &Manifest, renewal: &BatchRenewal) -> bool {
             .iter()
             .filter(|piece| renewal.is_renewed(piece))
             .count();
-        renewed >= DATA_PIECES
+        renewed >= chunk.layout.data()
     })
 }
 

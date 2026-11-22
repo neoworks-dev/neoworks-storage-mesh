@@ -18,8 +18,8 @@ pub struct RenewReport {
     /// Pieces whose lease now lasts at least the requested time.
     pub renewed: usize,
     /// Pieces whose node did not have them, refused or could not be reached.
-    /// Their chunks are fine as long as four pieces each remain; bringing the
-    /// rest back is repair's job.
+    /// Their chunks are fine as long as each keeps as many pieces as it has
+    /// data pieces; bringing the rest back is repair's job.
     pub not_renewed: Vec<PlacedPiece>,
 }
 
@@ -36,8 +36,8 @@ pub async fn renew(
         renewed: 0,
         not_renewed: Vec::new(),
     };
-    // One chunk at a time keeps the number of open requests at six, however
-    // large the file.
+    // One chunk at a time keeps the number of open requests at one chunk's
+    // pieces, however large the file.
     for chunk in &manifest.chunks {
         let renewals = chunk
             .pieces

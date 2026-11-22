@@ -1,8 +1,9 @@
 //! Bringing a file back to full strength after nodes lost pieces.
 //!
-//! A chunk survives the loss of two of its six pieces, but not a third. Repair
-//! fetches four healthy pieces, rebuilds the sealed chunk, cuts it again and
-//! stores the pieces that were lost on other nodes. Cutting is deterministic,
+//! A chunk survives the loss of as many pieces as its layout has parity
+//! pieces, but not one more. Repair fetches as many healthy pieces as the
+//! chunk has data pieces, rebuilds the sealed chunk, cuts it again and stores
+//! the pieces that were lost on other nodes. Cutting is deterministic,
 //! so a rebuilt piece is byte for byte the piece that was lost: its id and
 //! Merkle root stay the same, and only the node it lives on changes.
 //!
@@ -21,14 +22,6 @@ use crate::node_client::NodeClient;
 use crate::node_list::NodeList;
 use crate::placement::store_pieces;
 
-/// A chunk is repaired once it has this many healthy pieces or fewer.
-///
-/// Rebuilding even one piece means downloading four, so a larger code would
-/// wait for several losses and repair them together. With six pieces, though,
-/// the first loss already leaves only one spare; waiting for a second would
-/// leave none.
-pub const REPAIR_AT: usize = 5;
-
 /// What repair did with one chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChunkRepair {
@@ -39,7 +32,8 @@ pub enum ChunkRepair {
     /// Some pieces could not be placed, because no node the rules allow took
     /// them.
     Partly { replaced: usize, unplaced: usize },
-    /// Fewer than four pieces could be fetched, so the chunk can't be rebuilt.
+    /// Fewer pieces than the chunk has data pieces could be fetched, so it
+    /// can't be rebuilt.
     Lost { fetched: usize },
 }
 
@@ -49,7 +43,8 @@ pub struct RepairReport {
     pub chunks: Vec<ChunkRepair>,
 }
 
-/// Repairs the chunks of `manifest` that `audit` found weak, storing rebuilt
+/// Repairs the chunks of `manifest` that `audit` found to have lost a piece,
+/// storing rebuilt
 /// pieces on nodes chosen from `list` for `lease`, and updates `manifest`
 /// with their new nodes.
 ///
@@ -78,15 +73,17 @@ async fn repair_chunk(
     list: &NodeList,
     lease: Duration,
 ) -> ChunkRepair {
-    if chunk_audit.healthy() > REPAIR_AT {
+    // Run by hand on a device, repair fixes every loss it finds. Waiting for
+    // more losses is the coordinator's call, which watches nodes over time.
+    if chunk_audit.healthy() == chunk.layout.total() {
         return ChunkRepair::Intact;
     }
     let survivors = fetch_healthy_pieces(client, list, chunk, chunk_audit).await;
     let fetched = survivors.iter().filter(|piece| piece.is_some()).count();
-    let Ok(sealed) = rebuild(&survivors, chunk.sealed_len as usize) else {
+    let Ok(sealed) = rebuild(&survivors, chunk.sealed_len as usize, chunk.layout) else {
         return ChunkRepair::Lost { fetched };
     };
-    let rebuilt_pieces = cut(&sealed);
+    let rebuilt_pieces = cut(&sealed, chunk.layout);
     let mut lost_indexes = Vec::new();
     let mut unplaced = 0;
     for (index, health) in chunk_audit.pieces.iter().enumerate() {
@@ -108,7 +105,8 @@ async fn repair_chunk(
         .map(|&index| rebuilt_pieces[index].clone())
         .collect();
     let (holding, failed) = nodes_by_health(chunk, chunk_audit);
-    let placed = store_pieces(client, list, &lost_pieces, &holding, &failed, lease).await;
+    let limits = chunk.spread().limits();
+    let placed = store_pieces(client, list, &lost_pieces, &holding, &failed, limits, lease).await;
     let mut replaced = 0;
     for (index, piece) in lost_indexes.into_iter().zip(placed) {
         match piece {

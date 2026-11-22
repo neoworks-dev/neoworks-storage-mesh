@@ -31,7 +31,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use mesh_client::erasure::DATA_PIECES;
 use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
 };
@@ -331,12 +330,13 @@ async fn audit(
     let unreadable = report
         .chunks
         .iter()
-        .filter(|chunk_audit| chunk_audit.healthy() < DATA_PIECES)
+        .zip(&manifest.chunks)
+        .filter(|(chunk_audit, chunk)| chunk_audit.healthy() < chunk.layout.data())
         .count();
     if unreadable == 0 {
         println!("every chunk can be read");
     } else {
-        println!("{unreadable} chunks have fewer than {DATA_PIECES} healthy pieces");
+        println!("{unreadable} chunks have fewer healthy pieces than they need");
     }
     Ok(())
 }
@@ -355,7 +355,8 @@ async fn repair(
     let lease = days_to_duration(days);
     let report = mesh_client::repair(client, &mut manifest, &audit, &list, lease).await;
     let mut any_moved = false;
-    for (index, outcome) in report.chunks.iter().enumerate() {
+    for (index, (outcome, chunk)) in report.chunks.iter().zip(&manifest.chunks).enumerate() {
+        let needed = chunk.layout.data();
         match outcome {
             ChunkRepair::Intact => println!("chunk {index}: intact"),
             ChunkRepair::Repaired { replaced } => {
@@ -367,7 +368,7 @@ async fn repair(
                 any_moved |= *replaced > 0;
             }
             ChunkRepair::Lost { fetched } => {
-                println!("chunk {index}: lost, only {fetched} of {DATA_PIECES} pieces needed");
+                println!("chunk {index}: lost, only {fetched} of {needed} pieces needed");
             }
         }
     }

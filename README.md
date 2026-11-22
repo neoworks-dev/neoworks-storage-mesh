@@ -23,10 +23,14 @@ it into erasure-coded pieces and spread those over independent nodes.
 
 Early. A file is cut into chunks where its content says, each encrypted under
 a key derived from its bytes, so a chunk you already stored is never stored
-again: an edited file only uploads the chunks that changed. The chunks are spread over nodes chosen from a list, so that no
-operator, network or subnet holds more pieces of a chunk than it can lose,
-and a file can be read back while any two of a chunk's nodes are down, have
-lost their pieces or return corrupted ones. Nodes keep each piece for a lease
+again: an edited file only uploads the chunks that changed. Each chunk is
+cut into data and parity pieces, 4 + 2 by default, or the cheapest layout
+that meets what an app says the file is worth: how much loss it tolerates,
+how fast it must read and how many regions it must span. The pieces are
+spread over nodes chosen from a list, so that no operator, network, subnet
+or region holds more pieces of a chunk than it can lose, and a file can be
+read back while as many of a chunk's nodes as it has parity pieces are down,
+have lost their pieces or return corrupted ones. Nodes keep each piece for a lease
 and delete it once the lease ends unless it is renewed, which is also how a
 file is deleted. An audit checks that the nodes still hold every piece, from
 a few random segments with Merkle proofs, and repair rebuilds lost pieces

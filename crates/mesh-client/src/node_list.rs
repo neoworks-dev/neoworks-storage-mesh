@@ -8,13 +8,13 @@
 //! ```json
 //! [
 //!   { "id": "3f1c…", "url": "http://203.0.113.7:7001", "operator": "alice", "network": "AS3320" },
-//!   { "id": "9a0e…", "url": "http://198.51.100.2:7001", "operator": "bob", "network": "AS24940", "weight": 2.0 }
+//!   { "id": "9a0e…", "url": "http://198.51.100.2:7001", "operator": "bob", "network": "AS24940", "region": "DE", "weight": 2.0 }
 //! ]
 //! ```
 //!
-//! A node prints its id when it starts. `operator` and `network` say which
-//! nodes can fail together: one person's machines, or one internet provider's
-//! network (its AS number). Placement uses them to keep any one of them from
+//! A node prints its id when it starts. `operator`, `network` and `region`
+//! say which nodes can fail together: one person's machines, one internet
+//! provider's network (its AS number), or one country. Placement uses them to keep any one of them from
 //! holding too much of a chunk.
 
 use std::path::Path;
@@ -39,6 +39,11 @@ pub struct NodeInfo {
     pub operator: String,
     /// The network the node is reached through, such as an AS number.
     pub network: String,
+    /// Where the node is, such as a country code; `None` when unknown, and
+    /// then the node counts as a region of its own. A disaster or a law can
+    /// take out a whole region at once.
+    #[serde(default)]
+    pub region: Option<String>,
     /// How much more often than others the node is chosen. From a
     /// coordinator it is the node's measured uptime; in a file it is set by
     /// hand.
@@ -134,6 +139,7 @@ impl NodeList {
                     url: listed.record.body.url.clone(),
                     operator: listed.operator_id.clone().unwrap_or_else(on_its_own),
                     network: listed.measured_network.clone().unwrap_or_else(on_its_own),
+                    region: listed.measured_country.clone(),
                     weight: f64::from(listed.uptime_permille) / 1000.0,
                 }
             })

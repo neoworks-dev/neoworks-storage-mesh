@@ -41,7 +41,7 @@ async fn an_unrenewed_file_expires_and_leaves_the_disk() {
     assert!(matches!(
         result,
         Err(DownloadError::Rebuild {
-            source: RebuildError::TooFewPieces { found: 0 },
+            source: RebuildError::TooFewPieces { found: 0, .. },
             ..
         })
     ));
@@ -141,7 +141,8 @@ async fn nodes_refuse_leases_longer_than_they_grant() {
         result,
         Err(UploadError::NotEnoughNodes {
             chunk: 0,
-            placed: 0
+            placed: 0,
+            ..
         })
     ));
 }

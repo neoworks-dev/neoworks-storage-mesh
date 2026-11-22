@@ -7,11 +7,13 @@
 //! 2. Each chunk is sealed under a key derived from its bytes and the owner's
 //!    [`DedupKey`], so a chunk the owner already stored is not stored again
 //!    ([`encryption`]).
-//! 3. Each sealed chunk is cut into six pieces, any four of which rebuild it
-//!    ([`erasure`]).
+//! 3. Each sealed chunk is cut into data and parity pieces, any `data` of
+//!    which rebuild it ([`erasure`]): 4 + 2 by default, or the cheapest
+//!    layout that meets what the file is worth to the app
+//!    ([`layout_choice`]).
 //! 4. Each piece goes to a different node from a [`NodeList`], chosen so that
-//!    no operator or network holds too many ([`placement`]). The node sees
-//!    only noise and keeps it for a lease the owner sets.
+//!    no operator, network or region holds too many ([`placement`]). The node
+//!    sees only noise and keeps it for a lease the owner sets.
 //!
 //! The [`Manifest`] that comes out holds the chunk keys and where every piece
 //! is. [`download`] uses it to fetch, rebuild and open the file again,
@@ -39,6 +41,7 @@ mod download;
 pub mod encryption;
 pub mod erasure;
 pub mod index;
+pub mod layout_choice;
 mod manifest;
 pub mod merge;
 mod node_client;
@@ -62,5 +65,5 @@ pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
 pub use node_client::{NodeClient, NodeRequestError, PointerStored};
 pub use node_list::{NodeInfo, NodeList, NodeListError};
 pub use renew::{RenewReport, renew};
-pub use repair::{ChunkRepair, REPAIR_AT, RepairReport, repair};
-pub use upload::{UploadError, upload};
+pub use repair::{ChunkRepair, RepairReport, repair};
+pub use upload::{Stored, UploadError, upload, upload_spread};

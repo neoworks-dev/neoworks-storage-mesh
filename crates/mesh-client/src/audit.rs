@@ -15,7 +15,6 @@ use std::time::Duration;
 use futures::future::join_all;
 use mesh_core::merkle::{self, MerkleHash, SegmentProof};
 
-use crate::erasure;
 use crate::manifest::{Manifest, PlacedPiece};
 use crate::node_client::{NodeClient, NodeRequestError};
 use crate::node_list::NodeList;
@@ -60,7 +59,7 @@ pub struct AuditReport {
 
 impl ChunkAudit {
     /// How many of the chunk's pieces are healthy. The chunk can be read while
-    /// at least [`erasure::DATA_PIECES`] are.
+    /// at least as many are as it has data pieces.
     pub fn healthy(&self) -> usize {
         self.pieces
             .iter()
@@ -82,9 +81,9 @@ pub async fn audit(
 ) -> AuditReport {
     let mut chunks = Vec::with_capacity(manifest.chunks.len());
     for chunk in &manifest.chunks {
-        let piece_len = erasure::piece_len(chunk.sealed_len as usize);
+        let piece_len = chunk.layout.piece_len(chunk.sealed_len as usize);
         // Every piece of a chunk has the same length, so one draw of segments
-        // serves all six; each node still can't predict it.
+        // serves all of them; each node still can't predict it.
         let segments = random_segments(merkle::segment_count(piece_len));
         let audits = chunk
             .pieces

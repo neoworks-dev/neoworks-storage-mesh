@@ -2,12 +2,14 @@
 //!
 //! Nothing here does I/O. Nodes, clients and coordinators all depend on this
 //! crate, so it holds exactly what they have to agree on: how pieces and nodes
-//! are addressed, how a node proves it holds a piece, what a signed pointer
+//! are addressed, how a chunk is cut into pieces, how a node proves it holds
+//! a piece, what a signed pointer
 //! is, what the signed node list holds, what storage costs, and what the
 //! requests between them look like.
 
 mod canonical_hex;
 pub mod earnings;
+pub mod layout;
 pub mod merkle;
 mod node_id;
 pub mod node_list;
