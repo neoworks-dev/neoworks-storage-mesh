@@ -83,6 +83,13 @@ impl DedupKey {
 }
 
 impl ChunkKey {
+    /// The secret that proves to a coordinator that a chunk registration
+    /// comes from the chunk's owner. Derived one way from the key, so the
+    /// coordinator learns nothing that opens the chunk.
+    pub(crate) fn registration_secret(&self) -> [u8; 32] {
+        blake3::derive_key("neoworks-mesh chunk registration v1", &self.0)
+    }
+
     fn cipher(&self) -> XChaCha20Poly1305 {
         XChaCha20Poly1305::new(&Key::<XChaCha20Poly1305>::from(self.0))
     }

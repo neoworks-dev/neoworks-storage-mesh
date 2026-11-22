@@ -9,6 +9,11 @@
 //! prices too. Clients download the snapshot whole and check its signature
 //! against the coordinator keys they start with.
 //!
+//! Clients register their chunks here, by piece ids and nodes and without
+//! keys, and the coordinator rebuilds the pieces of nodes that go down onto
+//! new ones while the owners' devices are off, paid from what the failed
+//! nodes no longer earn ([`repairs`]).
+//!
 //! People also sign in here with an email and a password; the coordinator
 //! keeps only what checks a sign-in and the account's secret locked under a
 //! key it never sees. Signed-in accounts take tokens, signed blind: free
@@ -21,6 +26,8 @@
 //! through [`serve`].
 
 mod accounts;
+mod chunk_book;
+mod chunk_routes;
 mod clock;
 mod coordinator_key;
 mod earnings;
@@ -31,6 +38,7 @@ mod price_book;
 mod probe;
 mod publish;
 mod registry;
+mod repairs;
 mod routes;
 mod settings;
 mod sign_in_routes;
@@ -45,18 +53,21 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mesh_client::NodeClient;
 use mesh_core::node_list::CoordinatorKey;
 use mesh_core::signed::SigningKey;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::accounts::Accounts;
+use crate::chunk_book::ChunkBook;
 use crate::earnings::Earnings;
 use crate::expiry_warnings::ExpiryWarnings;
 use crate::locate::Locator;
 use crate::measurements::Measurements;
 use crate::price_book::PriceBook;
 use crate::registry::Registry;
+use crate::repairs::Repairer;
 use crate::routes::Coordinator;
 use crate::token_issuer::TokenIssuer;
 
@@ -71,6 +82,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/measurements.sqlite3  speed tests, node losses and usage
 /// <data>/prices.sqlite3        the signed price table of every day
 /// <data>/earnings.sqlite3      what operators earned and the repair pool
+/// <data>/chunks.sqlite3        chunks registered for repair
 /// <data>/accounts.sqlite3      what checking a sign-in needs
 /// <data>/tokens.sqlite3        token keys, issued counts, spent tokens
 /// <data>/warnings.sqlite3      expiry warnings sent
@@ -81,6 +93,7 @@ pub struct CoordinatorData {
     measurements: Measurements,
     prices: PriceBook,
     earnings: Earnings,
+    chunks: ChunkBook,
     accounts: Accounts,
     tokens: TokenIssuer,
     warnings: ExpiryWarnings,
@@ -113,6 +126,7 @@ impl CoordinatorData {
             measurements: Measurements::open(directory)?,
             prices: PriceBook::open(directory)?,
             earnings: Earnings::open(directory)?,
+            chunks: ChunkBook::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
             tokens: TokenIssuer::open(directory)?,
             warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
@@ -162,10 +176,23 @@ pub async fn serve(
     let tokens = Arc::new(data.tokens);
     let latest = Arc::new(RwLock::new(None));
     let prices = Arc::new(RwLock::new(None));
+    let chunks = Arc::new(data.chunks);
+    let repairer = Repairer {
+        client: NodeClient::new().map_err(std::io::Error::other)?,
+        registry: registry.clone(),
+        chunks: chunks.clone(),
+        earnings: earnings.clone(),
+        tokens: tokens.clone(),
+        latest: latest.clone(),
+        prices: prices.clone(),
+        own_key: CoordinatorKey(data.key.verifying_key().to_bytes()),
+    };
     let coordinator = Coordinator {
         registry: registry.clone(),
         earnings: earnings.clone(),
         accounts: Arc::new(data.accounts),
+        chunks,
+        chunk_owners: settings.coordinators.clone().map(Arc::new),
         tokens: tokens.clone(),
         key: data.key.clone(),
         latest: latest.clone(),
@@ -181,6 +208,7 @@ pub async fn serve(
         result = server => result,
         () = probe::probe_forever(http, locator, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = speed_test::measure_forever(registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
+        () = repairs::repair_forever(repairer, settings.clone()) => Ok(()),
         () = earnings::pay_out_forever(earnings, registry.clone(), tokens.clone(), settings.clone()) => Ok(()),
         () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
         () = price_book::price_forever(data.prices, data.key.clone(), latest.clone(), prices, settings.clone()) => Ok(()),

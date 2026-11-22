@@ -9,6 +9,7 @@ rust-version = "1.85"
 repository = "https://github.com/neoworks-dev/neoworks-storage-mesh"
 
 [workspace.dependencies]
+mesh-client = { path = "crates/mesh-client" }
 mesh-coordinator = { path = "crates/mesh-coordinator" }
 mesh-core = { path = "crates/mesh-core" }
 mesh-node = { path = "crates/mesh-node" }

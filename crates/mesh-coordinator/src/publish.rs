@@ -2,8 +2,9 @@
 //!
 //! A snapshot holds every node that answered at least one check in the
 //! uptime window, with its record, its uptime, its bandwidth, what it says it
-//! stores, the network and country the coordinator found it in and an id of
-//! its operator, and the loss rate over all nodes. Nodes that stopped
+//! stores, the network and country the coordinator found it in, an id of its
+//! operator and whether it is down right now, and the loss rate over all
+//! nodes. Nodes that stopped
 //! answering drop out of the next snapshot; their records stay in the
 //! registry, so they come back once they answer again.
 
@@ -54,6 +55,7 @@ pub async fn snapshot(
             measured_network: place.network,
             measured_country: place.country,
             operator_id: operator.map(|email| operator_id(&operator_key, &email)),
+            down: registry.down_since(&node_id).await?.is_some(),
         });
     }
     let loss_since = now.saturating_sub(settings.loss_window.as_secs());

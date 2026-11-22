@@ -121,6 +121,9 @@ impl NodeList {
     /// network for each of their nodes could otherwise collect a whole chunk.
     /// A node the coordinator couldn't place counts as an operator and
     /// network of its own.
+    ///
+    /// Nodes the coordinator marks down are left out, so nothing is read from
+    /// or placed on them; their pieces count as unreachable.
     pub fn from_snapshot(
         snapshot: &Signed<NodeSnapshot>,
         coordinators: &CoordinatorList,
@@ -130,6 +133,7 @@ impl NodeList {
             .body
             .nodes
             .iter()
+            .filter(|listed| !listed.down)
             .filter(|listed| listed.record.verify_node().is_ok())
             .map(|listed| {
                 let id = listed.record.body.node_id;
@@ -178,6 +182,7 @@ mod tests {
             measured_network: None,
             measured_country: None,
             operator_id: None,
+            down: false,
         }
     }
 

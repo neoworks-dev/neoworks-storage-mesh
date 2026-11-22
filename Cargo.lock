@@ -1133,6 +1133,7 @@ dependencies = [
  "futures",
  "getrandom",
  "hex",
+ "mesh-client",
  "mesh-core",
  "mesh-node",
  "reqwest",

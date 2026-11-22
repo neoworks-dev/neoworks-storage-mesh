@@ -256,6 +256,25 @@ impl Earnings {
         Ok(())
     }
 
+    /// Takes up to `micro` millionths of a token out of the repair pool, to
+    /// pay a node that took a rebuilt piece, and returns what it took: all of
+    /// it, or what the pool held when that was less.
+    pub async fn take_from_repair_pool(&self, micro: u64) -> rusqlite::Result<u64> {
+        // The lock is held from reading the pool to taking from it, so two
+        // repairs never take the same share.
+        let connection = self.connection.lock().await;
+        let held: u64 =
+            connection.query_row("SELECT micro FROM repair_pool WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
+        let taken = held.min(micro);
+        connection.execute(
+            "UPDATE repair_pool SET micro = micro - ?1 WHERE id = 1",
+            params![taken],
+        )?;
+        Ok(taken)
+    }
+
     /// What the repair pool holds, in millionths of a token.
     #[cfg(test)]
     pub async fn repair_pool(&self) -> rusqlite::Result<u64> {
@@ -396,6 +415,17 @@ mod tests {
         assert_eq!(earnings.unpaid(&node(1)).await.unwrap(), 400);
         assert_eq!(earnings.repair_pool().await.unwrap(), 600);
         assert!(earnings.held_nodes().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repairs_take_no_more_than_the_pool_holds() {
+        let (_directory, earnings) = earnings();
+        earnings.hold(&node(1), 1_000, 0, 100).await.unwrap();
+        earnings.settle(100, &HashSet::new()).await.unwrap();
+
+        assert_eq!(earnings.take_from_repair_pool(600).await.unwrap(), 600);
+        assert_eq!(earnings.take_from_repair_pool(600).await.unwrap(), 400);
+        assert_eq!(earnings.repair_pool().await.unwrap(), 0);
     }
 
     #[tokio::test]

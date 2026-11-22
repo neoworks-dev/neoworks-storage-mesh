@@ -36,7 +36,9 @@ file is deleted. An audit checks that the nodes still hold every piece, from
 a few random segments with Merkle proofs, and repair rebuilds lost pieces
 onto other nodes. Each node has a key of its own and registers with a
 coordinator, which checks that nodes are up, measures how fast they are and
-publishes a signed list of them.
+publishes a signed list of them. Clients register their chunks there by
+piece ids, without keys, and the coordinator rebuilds the pieces of nodes
+that go down while the owner's devices are off.
 
 Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
 nodes and coordinators can't tell whose they are. Nodes never set prices:

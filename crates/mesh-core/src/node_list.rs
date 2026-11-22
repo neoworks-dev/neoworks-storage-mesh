@@ -94,6 +94,10 @@ pub struct ListedNode {
     /// nothing else about the account; `None` while the node names no
     /// operator. Unlike the record's `operator`, the node can't choose it.
     pub operator_id: Option<String>,
+    /// Whether the node failed its last three checks within ten minutes.
+    /// Clients neither read from it nor place pieces on it, and the
+    /// coordinator repairs what it held.
+    pub down: bool,
 }
 
 /// Every node a coordinator knows, at one moment.
@@ -246,6 +250,7 @@ mod tests {
                 measured_network: None,
                 measured_country: None,
                 operator_id: None,
+                down: false,
             }],
             daily_loss_per_million: None,
         };

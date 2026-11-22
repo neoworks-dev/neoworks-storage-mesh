@@ -19,7 +19,8 @@
 //! is. [`download`] uses it to fetch, rebuild and open the file again,
 //! [`renew`] to keep it stored, [`audit`] to check that the nodes still hold
 //! it, and [`repair`] to replace the pieces they lost. A file nobody renews
-//! expires.
+//! expires. Registered with a coordinator ([`chunk_registration`]), a file
+//! is repaired there too while the owner's devices are off.
 //!
 //! A signed pointer ([`pointers`]) is the one place whose address does not
 //! change: it sits on nodes picked from the owner's key and says where the
@@ -34,6 +35,7 @@
 pub mod account;
 mod audit;
 pub mod batch_renew;
+pub mod chunk_registration;
 pub mod chunking;
 pub mod collection;
 pub mod commits;

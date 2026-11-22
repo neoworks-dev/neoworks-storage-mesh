@@ -24,6 +24,11 @@
 //! derives those keys from a dedup key kept in `mesh.key`, which it creates
 //! on first use; until there are accounts, that file is what makes the same
 //! chunk encrypt the same way every time.
+//!
+//! With a coordinator, `put`, `renew` and `repair` register the file's chunks
+//! there, by piece ids and nodes and without keys, so the coordinator repairs
+//! them while this device is off. Every command that reads a manifest first
+//! takes in where the coordinator moved pieces since, and saves it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,6 +36,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
+use mesh_client::chunk_registration::{register, take_new_locations};
+use mesh_client::index::unix_now;
 use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
 };
@@ -264,7 +271,51 @@ async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()
         arguments.days,
         arguments.manifest.display()
     );
+    register_for_repair(client, &arguments.nodes, &manifest, lease).await
+}
+
+/// Registers `manifest` for repair until `lease` from now with the
+/// coordinator `nodes` names, if it names one.
+async fn register_for_repair(
+    client: &NodeClient,
+    nodes: &NodeListArguments,
+    manifest: &Manifest,
+    lease: Duration,
+) -> anyhow::Result<()> {
+    let Some(coordinator) = &nodes.coordinator else {
+        return Ok(());
+    };
+    let expires_at = unix_now() + lease.as_secs();
+    let kept = register(client, coordinator, manifest, expires_at)
+        .await
+        .context("registering the chunks for repair")?;
+    println!(
+        "{coordinator} repairs {kept} of {} chunks",
+        manifest.chunks.len()
+    );
     Ok(())
+}
+
+/// The manifest in `path`, with the pieces that the coordinator `nodes`
+/// names, if it names one, moved in repair since; saved again when any
+/// moved.
+async fn read_current_manifest(
+    client: &NodeClient,
+    path: &Path,
+    nodes: &NodeListArguments,
+) -> anyhow::Result<Manifest> {
+    let mut manifest = read_manifest(path)?;
+    let Some(coordinator) = &nodes.coordinator else {
+        return Ok(manifest);
+    };
+    let moved = take_new_locations(client, coordinator, &mut manifest)
+        .await
+        .context("asking where repair moved pieces")?;
+    if moved > 0 {
+        write_manifest(path, &manifest)?;
+        println!("repair moved {moved} pieces; manifest updated");
+    }
+    Ok(manifest)
 }
 
 /// The dedup key in `path`, or a new one written there, readable by its
@@ -295,14 +346,15 @@ async fn renew(
     days: u64,
 ) -> anyhow::Result<()> {
     let list = load_node_list(client, nodes).await?;
-    let manifest = read_manifest(manifest_path)?;
-    let report = mesh_client::renew(client, &list, &manifest, days_to_duration(days)).await;
+    let manifest = read_current_manifest(client, manifest_path, nodes).await?;
+    let lease = days_to_duration(days);
+    let report = mesh_client::renew(client, &list, &manifest, lease).await;
     println!(
         "renewed {} pieces for {days} days, {} not renewed",
         report.renewed,
         report.not_renewed.len()
     );
-    Ok(())
+    register_for_repair(client, nodes, &manifest, lease).await
 }
 
 /// Prints one line per chunk, the unhealthy pieces under it, and whether the
@@ -313,7 +365,7 @@ async fn audit(
     nodes: &NodeListArguments,
 ) -> anyhow::Result<()> {
     let list = load_node_list(client, nodes).await?;
-    let manifest = read_manifest(manifest_path)?;
+    let manifest = read_current_manifest(client, manifest_path, nodes).await?;
     let report = mesh_client::audit(client, &list, &manifest, AUDIT_DEADLINE).await;
     for (index, (chunk, chunk_audit)) in manifest.chunks.iter().zip(&report.chunks).enumerate() {
         println!(
@@ -350,7 +402,7 @@ async fn repair(
     days: u64,
 ) -> anyhow::Result<()> {
     let list = load_node_list(client, nodes).await?;
-    let mut manifest = read_manifest(manifest_path)?;
+    let mut manifest = read_current_manifest(client, manifest_path, nodes).await?;
     let audit = mesh_client::audit(client, &list, &manifest, AUDIT_DEADLINE).await;
     let lease = days_to_duration(days);
     let report = mesh_client::repair(client, &mut manifest, &audit, &list, lease).await;
@@ -372,11 +424,13 @@ async fn repair(
             }
         }
     }
-    if any_moved {
-        write_manifest(manifest_path, &manifest)?;
-        println!("manifest updated");
+    if !any_moved {
+        return Ok(());
     }
-    Ok(())
+    write_manifest(manifest_path, &manifest)?;
+    println!("manifest updated");
+    // The coordinator learns of the new locations, so it repairs from there.
+    register_for_repair(client, nodes, &manifest, lease).await
 }
 
 async fn get(
@@ -386,7 +440,7 @@ async fn get(
     nodes: &NodeListArguments,
 ) -> anyhow::Result<()> {
     let list = load_node_list(client, nodes).await?;
-    let manifest = read_manifest(manifest_path)?;
+    let manifest = read_current_manifest(client, manifest_path, nodes).await?;
     download_to(client, &list, &manifest, output).await
 }
 

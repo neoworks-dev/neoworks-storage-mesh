@@ -243,6 +243,7 @@ mod tests {
             measured_network: None,
             measured_country: None,
             operator_id: None,
+            down: false,
         }
     }
 

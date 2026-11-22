@@ -20,6 +20,9 @@ clap.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+# Repair rebuilds and places pieces the way a client's repair does, so it
+# uses the client library's erasure coding and placement.
+mesh-client.workspace = true
 mesh-core.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true

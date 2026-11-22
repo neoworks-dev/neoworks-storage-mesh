@@ -1,6 +1,6 @@
 //! The coordinator's HTTP interface: nodes register and name their operator,
-//! clients fetch the node list and the prices, and people sign up and sign
-//! in ([`sign_in_routes`]).
+//! clients fetch the node list and the prices and register chunks for repair
+//! ([`chunk_routes`]), and people sign up and sign in ([`sign_in_routes`]).
 
 use std::sync::Arc;
 
@@ -11,12 +11,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use mesh_core::NodeId;
 use mesh_core::earnings::{OPERATOR_ROUTE, OperatorClaim};
-use mesh_core::node_list::NodeRecord;
+use mesh_core::node_list::{CoordinatorList, NodeRecord};
 use mesh_core::prices::PRICES_ROUTE;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
 use mesh_core::signed::{Signed, SigningKey};
 
 use crate::accounts::Accounts;
+use crate::chunk_book::ChunkBook;
+use crate::chunk_routes;
 use crate::clock::unix_now;
 use crate::earnings::{Earnings, Linked};
 use crate::price_book::LatestPrices;
@@ -33,6 +35,10 @@ pub struct Coordinator {
     pub registry: Arc<Registry>,
     pub earnings: Arc<Earnings>,
     pub accounts: Arc<Accounts>,
+    pub chunks: Arc<ChunkBook>,
+    /// All coordinators, when there are several, among which this one keeps
+    /// only the chunks it is responsible for.
+    pub chunk_owners: Option<Arc<CoordinatorList>>,
     pub tokens: Arc<TokenIssuer>,
     /// The coordinator's key, which signs token keys.
     pub key: SigningKey,
@@ -56,6 +62,7 @@ pub fn router(coordinator: Coordinator) -> Router {
         .route(PRICES_ROUTE, get(prices))
         .merge(sign_in_routes::routes())
         .merge(token_routes::routes())
+        .merge(chunk_routes::routes())
         .with_state(coordinator)
 }
 
