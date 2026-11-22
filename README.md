@@ -169,14 +169,15 @@ sign up with an email and password once, then sign in on the new device; the
 password is read from standard input:
 
 ```sh
-target/release/mesh sign-up ana@example.org --coordinator http://127.0.0.1:7000
-target/release/mesh sign-in ana@example.org --coordinator http://127.0.0.1:7000 \
-  --account phone.key
+target/release/mesh sign-up ana@example.org $N
+target/release/mesh sign-in ana@example.org $N --account phone.key
 ```
 
-The coordinator keeps the secret locked under a key derived from the
-password, which it never sees. `mesh-index.json` is this device's copy of the index;
-`--index` names another, as a second device would have.
+The secret is locked under a key derived from the password and kept in the
+mesh, at a place only the email and password lead to, so signing in works
+through any coordinator's node list. `renew-all` keeps it stored with the
+rest. `mesh-index.json` is this device's copy of the index; `--index` names
+another, as a second device would have.
 
 ### Locating nodes
 

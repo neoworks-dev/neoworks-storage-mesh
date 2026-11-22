@@ -10,7 +10,8 @@
 //!
 //! Knowing one derived key reveals nothing about the secret or the others.
 //! The secret reaches a new device by signing in with an email and password
-//! ([`sign_in`](crate::sign_in)), or as a hex string in a file.
+//! ([`sign_in_bundle`](crate::sign_in_bundle)), or as a hex string in a
+//! file.
 
 use mesh_core::pointer::SigningKey;
 

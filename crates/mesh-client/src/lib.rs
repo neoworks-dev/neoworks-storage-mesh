@@ -34,6 +34,9 @@
 //!
 //! People leave each other small sealed messages in [`mailboxes`] on nodes,
 //! found by a hash of the recipient's key and the week.
+//!
+//! A new device signs in with an email and password, which lead it to the
+//! account's secret, locked in a pointer in the mesh ([`sign_in_bundle`]).
 
 pub mod account;
 mod audit;
@@ -59,6 +62,7 @@ mod random;
 mod renew;
 mod repair;
 pub mod sign_in;
+pub mod sign_in_bundle;
 pub mod tabs;
 pub mod tokens;
 mod upload;

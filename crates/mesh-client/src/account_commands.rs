@@ -12,6 +12,7 @@ use anyhow::Context;
 use clap::Args;
 use mesh_client::account::Account;
 use mesh_client::index::{Index, Session, unix_now};
+use mesh_client::sign_in_bundle::{BUNDLE_KDF, BundlePlace, open_bundle, store_bundle};
 use mesh_client::{NodeClient, NodeList, upload};
 use mesh_core::sign_in::KdfParams;
 
@@ -58,18 +59,24 @@ fn write_account(path: &Path, account: &Account) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Creates an account for `email` on `coordinator`, with the secret in
-/// `account_path`, made first if it does not exist.
+/// Creates a sign-in for `email`, with the account's secret in the file
+/// `arguments` names, made first if it does not exist.
+///
+/// The coordinator the node list comes from records the account, since it
+/// checks sign-ins before handing out tokens. The secret itself is locked in
+/// the mesh, and the index records where, so that renewing keeps it.
 pub async fn sign_up(
     client: &NodeClient,
-    coordinator: &str,
     email: &str,
-    account_path: &Path,
+    arguments: &AccountArguments,
 ) -> anyhow::Result<()> {
-    if !account_path.exists() {
-        account_new(account_path)?;
+    let Some(coordinator) = &arguments.nodes.source.coordinator else {
+        anyhow::bail!("signing up needs --coordinator, which checks sign-ins for tokens");
+    };
+    if !arguments.account.exists() {
+        account_new(&arguments.account)?;
     }
-    let account = read_account(account_path)?;
+    let account = read_account(&arguments.account)?;
     let password = read_password()?;
     mesh_client::sign_in::sign_up(
         client,
@@ -80,24 +87,39 @@ pub async fn sign_up(
         KdfParams::DEFAULT,
     )
     .await?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let session = Session {
+        client,
+        list: &list,
+        account: &account,
+        device: arguments.device.clone(),
+        lease: days_to_duration(arguments.days),
+    };
+    let place = BundlePlace::derive(email, &password, BUNDLE_KDF)?;
+    store_bundle(client, &list, &place, &account, session.lease).await?;
+    let mut index = read_index(&arguments.index)?;
+    index.pull(&session).await?;
+    index.keep_sign_in_place(&session, &place).await?;
+    write_index(&arguments.index, &index)?;
     println!("signed up as {email}");
     Ok(())
 }
 
-/// Signs in as `email` on `coordinator` and writes the account's secret to
-/// `account_path`, which must not exist yet.
+/// Signs in as `email` from the mesh and writes the account's secret to the
+/// file `arguments` names, which must not exist yet.
 pub async fn sign_in(
     client: &NodeClient,
-    coordinator: &str,
     email: &str,
-    account_path: &Path,
+    arguments: &AccountArguments,
 ) -> anyhow::Result<()> {
     let password = read_password()?;
-    let account = mesh_client::sign_in::sign_in(client, coordinator, email, &password).await?;
-    write_account(account_path, &account)?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let place = BundlePlace::derive(email, &password, BUNDLE_KDF)?;
+    let account = open_bundle(client, &list, &place).await?;
+    write_account(&arguments.account, &account)?;
     println!(
         "signed in as {email}; the account is in {}",
-        account_path.display()
+        arguments.account.display()
     );
     Ok(())
 }

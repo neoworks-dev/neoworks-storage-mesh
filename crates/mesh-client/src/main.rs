@@ -102,20 +102,15 @@ enum Command {
     /// from standard input; creates the account first if needed.
     SignUp {
         email: String,
-        /// The sign-in coordinator.
-        #[arg(long)]
-        coordinator: String,
-        #[arg(long, default_value = "account.key")]
-        account: PathBuf,
+        #[command(flatten)]
+        account: AccountArguments,
     },
-    /// Signs in on a new device and writes the account's secret.
+    /// Signs in on a new device and writes the account's secret, found in
+    /// the mesh from the email and password alone.
     SignIn {
         email: String,
-        /// The sign-in coordinator.
-        #[arg(long)]
-        coordinator: String,
-        #[arg(long, default_value = "account.key")]
-        account: PathBuf,
+        #[command(flatten)]
+        account: AccountArguments,
     },
     /// Stores a file and records it in the account's index.
     Store {
@@ -215,16 +210,12 @@ async fn main() -> anyhow::Result<()> {
             nodes,
         } => get(&client, &manifest, &output, &nodes).await,
         Command::AccountNew { account } => account_commands::account_new(&account),
-        Command::SignUp {
-            email,
-            coordinator,
-            account,
-        } => account_commands::sign_up(&client, &coordinator, &email, &account).await,
-        Command::SignIn {
-            email,
-            coordinator,
-            account,
-        } => account_commands::sign_in(&client, &coordinator, &email, &account).await,
+        Command::SignUp { email, account } => {
+            account_commands::sign_up(&client, &email, &account).await
+        }
+        Command::SignIn { email, account } => {
+            account_commands::sign_in(&client, &email, &account).await
+        }
         Command::Store {
             file,
             name,
