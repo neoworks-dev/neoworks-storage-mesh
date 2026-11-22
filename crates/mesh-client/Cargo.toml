@@ -29,5 +29,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+mesh-coordinator.workspace = true
 mesh-node.workspace = true
 tempfile.workspace = true

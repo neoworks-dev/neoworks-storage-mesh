@@ -1,4 +1,4 @@
-//! What a node and a client agree on over HTTP.
+//! What nodes, clients and coordinators agree on over HTTP.
 //!
 //! Every piece is stored under a lease: the node keeps it until the lease
 //! ends and then deletes it, unless someone renews it first. Nobody can delete
@@ -141,3 +141,14 @@ pub struct PointerConflict {
     /// The version of the record the node keeps.
     pub held_version: u64,
 }
+
+/// The route a node registers at on a coordinator: `POST` with a signed
+/// [`NodeRecord`](crate::node_list::NodeRecord) in JSON. The coordinator
+/// answers `204 No Content` once the record is genuine, recent, newer than
+/// the one it holds, and its URL answers as that node.
+pub const REGISTER_ROUTE: &str = "/nodes";
+
+/// The route of a coordinator's newest signed
+/// [`NodeSnapshot`](crate::node_list::NodeSnapshot): `GET` returns it in
+/// JSON, or `503 Service Unavailable` before the first one is published.
+pub const NODE_LIST_ROUTE: &str = "/node-list";

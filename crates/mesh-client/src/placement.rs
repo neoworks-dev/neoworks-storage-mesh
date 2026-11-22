@@ -200,6 +200,8 @@ mod tests {
 
     fn node(url: &str, operator: &str, network: &str) -> NodeInfo {
         NodeInfo {
+            // Placement compares nodes by URL, so an id made from it does.
+            id: mesh_core::NodeId::of(blake3::hash(url.as_bytes()).as_bytes()),
             url: url.to_string(),
             operator: operator.to_string(),
             network: network.to_string(),

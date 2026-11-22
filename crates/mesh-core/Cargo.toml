@@ -12,7 +12,5 @@ blake3.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
+thiserror.workspace = true

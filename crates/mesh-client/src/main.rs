@@ -10,10 +10,19 @@
 //! ```
 //!
 //! `nodes.json` lists the nodes to choose from; `mesh_client::NodeList`
-//! describes it. The manifest holds the chunk keys: anyone with it can read
-//! the file. `put` derives those keys from a dedup key kept in `mesh.key`,
-//! which it creates on first use; until there are accounts, that file is
-//! what makes the same chunk encrypt the same way every time.
+//! describes it. Instead of `--nodes`, `put` and `repair` take
+//! `--coordinator http://… --coordinators coordinators.json` to fetch the
+//! signed node list, where `coordinators.json` holds the coordinator list
+//! whose keys it must be signed with:
+//!
+//! ```json
+//! { "version": 1, "keys": ["5c0f…"] }
+//! ```
+//!
+//! The manifest holds the chunk keys: anyone with it can read the file. `put`
+//! derives those keys from a dedup key kept in `mesh.key`, which it creates
+//! on first use; until there are accounts, that file is what makes the same
+//! chunk encrypt the same way every time.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +34,7 @@ use mesh_client::erasure::DATA_PIECES;
 use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
 };
+use mesh_core::node_list::CoordinatorList;
 
 #[derive(Parser)]
 struct Arguments {
@@ -49,9 +59,8 @@ enum Command {
     /// the list and updates the manifest.
     Repair {
         manifest: PathBuf,
-        /// The JSON list of nodes to choose from.
-        #[arg(long)]
-        nodes: PathBuf,
+        #[command(flatten)]
+        nodes: NodeListArguments,
         /// How many days the new nodes keep the rebuilt pieces.
         #[arg(long, default_value_t = 30)]
         days: u64,
@@ -60,12 +69,26 @@ enum Command {
     Get { manifest: PathBuf, output: PathBuf },
 }
 
+/// Where the nodes to choose from come from: a file, or a coordinator.
+#[derive(Args)]
+#[group(required = true, multiple = true)]
+struct NodeListArguments {
+    /// A JSON list of nodes to choose from.
+    #[arg(long, conflicts_with = "coordinator")]
+    nodes: Option<PathBuf>,
+    /// A coordinator to fetch the signed node list from.
+    #[arg(long, requires = "coordinators")]
+    coordinator: Option<String>,
+    /// The JSON coordinator list whose signatures the node list must carry.
+    #[arg(long, requires = "coordinator")]
+    coordinators: Option<PathBuf>,
+}
+
 #[derive(Args)]
 struct PutArguments {
     file: PathBuf,
-    /// The JSON list of nodes to choose from.
-    #[arg(long)]
-    nodes: PathBuf,
+    #[command(flatten)]
+    nodes: NodeListArguments,
     /// Where to write the manifest. Keep it private: it holds the keys.
     #[arg(long)]
     manifest: PathBuf,
@@ -97,8 +120,34 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// The node list from the file or coordinator the arguments name.
+async fn load_node_list(
+    client: &NodeClient,
+    arguments: &NodeListArguments,
+) -> anyhow::Result<NodeList> {
+    if let Some(path) = &arguments.nodes {
+        return NodeList::read(path).with_context(|| format!("reading {}", path.display()));
+    }
+    // clap requires either `--nodes` or both of these.
+    let (Some(coordinator), Some(coordinators_path)) =
+        (&arguments.coordinator, &arguments.coordinators)
+    else {
+        anyhow::bail!("give --nodes, or --coordinator with --coordinators");
+    };
+    let json = std::fs::read(coordinators_path)
+        .with_context(|| format!("reading {}", coordinators_path.display()))?;
+    let coordinators: CoordinatorList = serde_json::from_slice(&json)
+        .with_context(|| format!("parsing {}", coordinators_path.display()))?;
+    let (list, published_at) = NodeList::fetch(client, coordinator, &coordinators).await?;
+    println!(
+        "{} nodes from {coordinator}, published at {published_at}",
+        list.nodes.len()
+    );
+    Ok(list)
+}
+
 async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()> {
-    let list = NodeList::read(&arguments.nodes)?;
+    let list = load_node_list(client, &arguments.nodes).await?;
     let dedup_key = load_or_create_dedup_key(&arguments.key_file)?;
     let earlier = arguments
         .earlier_manifests
@@ -188,10 +237,10 @@ async fn audit(client: &NodeClient, manifest_path: &Path) -> anyhow::Result<()> 
 async fn repair(
     client: &NodeClient,
     manifest_path: &Path,
-    nodes_path: &Path,
+    nodes: &NodeListArguments,
     days: u64,
 ) -> anyhow::Result<()> {
-    let list = NodeList::read(nodes_path)?;
+    let list = load_node_list(client, nodes).await?;
     let mut manifest = read_manifest(manifest_path)?;
     let audit = mesh_client::audit(client, &manifest, AUDIT_DEADLINE).await;
     let lease = days_to_duration(days);

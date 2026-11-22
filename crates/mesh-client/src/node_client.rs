@@ -86,6 +86,11 @@ impl NodeClient {
         })
     }
 
+    /// The HTTP client, for requests to coordinators.
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     /// How long each node took to answer its last piece fetch.
     pub(crate) fn latencies(&self) -> &LatencyTable {
         &self.latencies

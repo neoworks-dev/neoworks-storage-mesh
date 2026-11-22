@@ -1,0 +1,30 @@
+[package]
+name = "mesh-coordinator"
+version = "0.1.0"
+description = "A coordinator of the NeoWorks storage mesh: collects node records and publishes the signed node list"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mesh-coordinator"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+mesh-core.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+mesh-node.workspace = true
+tempfile.workspace = true

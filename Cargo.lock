@@ -918,11 +918,32 @@ dependencies = [
  "futures",
  "getrandom",
  "hex",
+ "mesh-coordinator",
  "mesh-core",
  "mesh-node",
  "reed-solomon-simd",
  "reqwest",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "mesh-coordinator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures",
+ "getrandom",
+ "hex",
+ "mesh-core",
+ "mesh-node",
+ "reqwest",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "thiserror",

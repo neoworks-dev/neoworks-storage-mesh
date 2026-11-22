@@ -13,6 +13,7 @@ use mesh_client::{
     UploadError, download, upload,
 };
 use mesh_core::NodeId;
+use mesh_core::signed::SigningKey;
 use mesh_node::{NodeData, NodeSettings};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -21,6 +22,7 @@ use tokio::task::JoinHandle;
 /// A node running in this process.
 pub struct TestNode {
     pub id: NodeId,
+    pub key: SigningKey,
     pub url: String,
     data: TempDir,
     server: JoinHandle<std::io::Result<()>>,
@@ -31,11 +33,13 @@ impl TestNode {
         let data = tempfile::tempdir().unwrap();
         let node_data = NodeData::open(data.path()).await.unwrap();
         let id = node_data.identity().node_id;
+        let key = node_data.key.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(mesh_node::serve(listener, node_data, settings));
         TestNode {
             id,
+            key,
             url,
             data,
             server,
@@ -160,6 +164,7 @@ pub fn node_list<'a>(nodes: impl IntoIterator<Item = &'a TestNode>) -> NodeList 
         .into_iter()
         .enumerate()
         .map(|(index, node)| NodeInfo {
+            id: node.id,
             url: node.url.clone(),
             operator: format!("operator-{index}"),
             network: format!("network-{index}"),

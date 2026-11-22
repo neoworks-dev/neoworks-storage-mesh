@@ -30,48 +30,62 @@ lost their pieces or return corrupted ones. Nodes keep each piece for a lease
 and delete it once the lease ends unless it is renewed, which is also how a
 file is deleted. An audit checks that the nodes still hold every piece, from
 a few random segments with Merkle proofs, and repair rebuilds lost pieces
-onto other nodes. There are no coordinators or tokens yet, so the node list
-is a file you write; the issues track what comes next.
+onto other nodes. Each node has a key of its own and registers with a
+coordinator, which checks that nodes are up and publishes a signed list of
+them. There are no tokens yet; the issues track what comes next.
 
 ## Layout
 
-- `crates/mesh-core`: types every role shares, such as piece ids.
+- `crates/mesh-core`: types every role shares, such as piece and node ids
+  and the signed records.
 - `crates/mesh-node`: the node, and the `mesh-node` binary.
+- `crates/mesh-coordinator`: the coordinator, and the `mesh-coordinator`
+  binary.
 - `crates/mesh-client`: chunking, encryption, erasure coding, placement,
   upload, download, audits and repair, and the `mesh` binary.
 
 ## Try it
 
-Start seven nodes in the background:
+Start a coordinator that publishes its node list every 10 seconds instead of
+every hour:
 
 ```sh
 cargo build --release
+target/release/mesh-coordinator --listen 127.0.0.1:7000 --data data/coordinator \
+  --publish-seconds 10 &
+```
+
+It prints its key, which clients check its node list against. Copy it into
+`coordinators.json`:
+
+```json
+{ "version": 1, "keys": ["<the coordinator key>"] }
+```
+
+Start seven nodes that register with it. On one machine every node needs its
+own `operator` and `network`, or placement won't put more than two pieces of
+a chunk on them:
+
+```sh
 for i in 1 2 3 4 5 6 7; do
-  target/release/mesh-node --listen 127.0.0.1:700$i --data data/node-$i &
+  target/release/mesh-node --listen 127.0.0.1:700$i --data data/node-$i \
+    --coordinator http://127.0.0.1:7000 --public-url http://127.0.0.1:700$i \
+    --operator op-$i --network net-$i --region local --capacity-gb 10 &
 done
 ```
 
-Write a node list. On one machine every node needs its own `operator` and
-`network`, or placement won't put more than two pieces of a chunk on them:
+Once the next list is out, store a file, stop two nodes and read it back:
 
 ```sh
-{
-  echo '['
-  for i in 1 2 3 4 5 6 7; do
-    comma=$([ $i -lt 7 ] && echo ,)
-    echo "  {\"url\": \"http://127.0.0.1:700$i\", \"operator\": \"op-$i\", \"network\": \"net-$i\"}$comma"
-  done
-  echo ']'
-} > nodes.json
-```
-
-Store a file, stop two nodes and read it back:
-
-```sh
-target/release/mesh put photo.jpg --nodes nodes.json --manifest photo.manifest.json
-kill %2 %5
+sleep 10
+target/release/mesh put photo.jpg --coordinator http://127.0.0.1:7000 \
+  --coordinators coordinators.json --manifest photo.manifest.json
+kill %3 %6
 target/release/mesh get photo.manifest.json photo-again.jpg
 ```
+
+Instead of a coordinator, `--nodes nodes.json` takes a list you write, as
+`mesh_client::NodeList` describes, with each node's id as it printed it.
 
 The manifest holds the chunk keys, so anyone who has it can read the file.
 The first `put` also creates `mesh.key`, your dedup key: keep it private, and
@@ -82,8 +96,9 @@ When you store a new version of a file, name the old manifest, and only the
 chunks that changed are uploaded:
 
 ```sh
-target/release/mesh put photo-edited.jpg --nodes nodes.json \
-  --manifest photo-edited.manifest.json --earlier photo.manifest.json
+target/release/mesh put photo-edited.jpg --coordinator http://127.0.0.1:7000 \
+  --coordinators coordinators.json --manifest photo-edited.manifest.json \
+  --earlier photo.manifest.json
 ```
 
 `put` stores a file for 30 days by default (`--days` changes it). To keep it
@@ -103,7 +118,8 @@ When nodes have lost pieces, rebuild them onto other nodes from the list.
 Repair updates the manifest with where the new pieces are:
 
 ```sh
-target/release/mesh repair photo.manifest.json --nodes nodes.json
+target/release/mesh repair photo.manifest.json --coordinator http://127.0.0.1:7000 \
+  --coordinators coordinators.json
 ```
 
 ## License
