@@ -118,8 +118,14 @@ pub enum TrustError {
 impl CoordinatorList {
     /// Checks that `snapshot` is signed by a coordinator on this list.
     pub fn check_snapshot(&self, snapshot: &Signed<NodeSnapshot>) -> Result<(), TrustError> {
-        self.check_signer(snapshot.signer)?;
-        snapshot.verify()?;
+        self.check_signed(snapshot)
+    }
+
+    /// Checks that `record`, such as a month's token key, is signed by a
+    /// coordinator on this list.
+    pub fn check_signed<T: SignedBody>(&self, record: &Signed<T>) -> Result<(), TrustError> {
+        self.check_signer(record.signer)?;
+        record.verify()?;
         Ok(())
     }
 

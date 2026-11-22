@@ -16,17 +16,22 @@ pub struct CoordinatorSettings {
     /// clock. Older records are refused, so one captured long ago cannot be
     /// registered again after the node moved.
     pub max_record_age: Duration,
+    /// The storage tokens each account gets per month; 100 tokens of
+    /// 100 MB are 10 GB.
+    pub monthly_allowance: u64,
 }
 
 impl Default for CoordinatorSettings {
     /// A check every five minutes and a snapshot every hour, as the design
-    /// has it; uptime over one day; records at most ten minutes off.
+    /// has it; uptime over one day; records at most ten minutes off; 10 GB
+    /// of tokens per account and month.
     fn default() -> Self {
         CoordinatorSettings {
             probe_interval: Duration::from_secs(5 * 60),
             publish_interval: Duration::from_secs(60 * 60),
             uptime_window: Duration::from_secs(24 * 60 * 60),
             max_record_age: Duration::from_secs(10 * 60),
+            monthly_allowance: 100,
         }
     }
 }

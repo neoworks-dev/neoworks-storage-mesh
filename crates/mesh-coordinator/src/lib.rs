@@ -8,7 +8,9 @@
 //!
 //! People also sign in here with an email and a password; the coordinator
 //! keeps only what checks a sign-in and the account's secret locked under a
-//! key it never sees. Storage tokens come later. The `mesh-coordinator` binary runs
+//! key it never sees. Signed-in accounts get their monthly allowance of
+//! storage tokens, signed blind, and the coordinator keeps the list of spent
+//! ones. The `mesh-coordinator` binary runs
 //! one; tests start coordinators in-process through [`serve`].
 
 mod accounts;
@@ -20,6 +22,8 @@ mod registry;
 mod routes;
 mod settings;
 mod sign_in_routes;
+mod token_issuer;
+mod token_routes;
 
 pub use coordinator_key::CoordinatorKeyError;
 pub use settings::CoordinatorSettings;
@@ -36,6 +40,7 @@ use tokio::sync::RwLock;
 use crate::accounts::Accounts;
 use crate::registry::Registry;
 use crate::routes::Coordinator;
+use crate::token_issuer::TokenIssuer;
 
 /// How long the coordinator waits for a node to answer a check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -46,10 +51,12 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/coordinator.key      the key snapshots are signed with
 /// <data>/registry.sqlite3     node records and check results
 /// <data>/accounts.sqlite3     what checking a sign-in needs
+/// <data>/tokens.sqlite3       token keys, issued counts, spent tokens
 /// ```
 pub struct CoordinatorData {
     registry: Registry,
     accounts: Accounts,
+    tokens: TokenIssuer,
     key: SigningKey,
 }
 
@@ -75,6 +82,7 @@ impl CoordinatorData {
         Ok(CoordinatorData {
             registry: Registry::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
+            tokens: TokenIssuer::open(directory)?,
             key,
         })
     }
@@ -101,9 +109,12 @@ pub async fn serve(
     let coordinator = Coordinator {
         registry: registry.clone(),
         accounts: Arc::new(data.accounts),
+        tokens: Arc::new(data.tokens),
+        key: data.key.clone(),
         latest: latest.clone(),
         http: http.clone(),
         max_record_age_seconds: settings.max_record_age.as_secs(),
+        monthly_allowance: settings.monthly_allowance,
     };
     let server = axum::serve(listener, routes::router(coordinator));
     // All three run on this task, so stopping the coordinator stops them all.

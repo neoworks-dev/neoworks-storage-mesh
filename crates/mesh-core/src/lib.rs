@@ -15,6 +15,7 @@ pub mod pointer;
 pub mod protocol;
 pub mod sign_in;
 pub mod signed;
+pub mod tokens;
 
 pub use node_id::{NodeId, ParseNodeIdError};
 pub use piece_id::{ParsePieceIdError, PieceId};

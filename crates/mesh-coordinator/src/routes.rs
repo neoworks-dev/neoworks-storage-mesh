@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use mesh_core::node_list::NodeRecord;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
-use mesh_core::signed::Signed;
+use mesh_core::signed::{Signed, SigningKey};
 
 use crate::accounts::Accounts;
 use crate::clock::unix_now;
@@ -18,16 +18,23 @@ use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
 use crate::registry::{Registered, Registry};
 use crate::sign_in_routes;
+use crate::token_issuer::TokenIssuer;
+use crate::token_routes;
 
 /// What every request handler needs.
 #[derive(Clone)]
 pub struct Coordinator {
     pub registry: Arc<Registry>,
     pub accounts: Arc<Accounts>,
+    pub tokens: Arc<TokenIssuer>,
+    /// The coordinator's key, which signs token keys.
+    pub key: SigningKey,
     pub latest: Arc<LatestSnapshot>,
     pub http: reqwest::Client,
     /// How far a record's signing time may be from now, in seconds.
     pub max_record_age_seconds: u64,
+    /// The tokens each account gets per month.
+    pub monthly_allowance: u64,
 }
 
 /// The router of `coordinator`.
@@ -36,6 +43,7 @@ pub fn router(coordinator: Coordinator) -> Router {
         .route(REGISTER_ROUTE, post(register))
         .route(NODE_LIST_ROUTE, get(node_list))
         .merge(sign_in_routes::routes())
+        .merge(token_routes::routes())
         .with_state(coordinator)
 }
 

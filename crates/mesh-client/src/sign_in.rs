@@ -72,11 +72,7 @@ pub async fn sign_in(
     email: &str,
     password: &str,
 ) -> Result<Account, SignInError> {
-    let request = SaltRequest {
-        email: email.to_string(),
-    };
-    let salt: SaltResponse = read(post(client, coordinator, SALT_ROUTE, &request).await?).await?;
-    let (auth_key, wrapping_key) = stretch(password, &salt.salt, salt.kdf)?;
+    let (auth_key, wrapping_key) = credentials(client, coordinator, email, password).await?;
     let request = SignInRequest {
         email: email.to_string(),
         auth_key,
@@ -92,6 +88,33 @@ pub async fn sign_in(
         .try_into()
         .map_err(|_| SignInError::UnexpectedAnswer)?;
     Ok(Account::from_secret(secret))
+}
+
+/// The auth key of `email` with `password`, which other requests to the
+/// coordinator, such as asking for tokens, prove the account with.
+pub async fn auth_key(
+    client: &NodeClient,
+    coordinator: &str,
+    email: &str,
+    password: &str,
+) -> Result<[u8; 32], SignInError> {
+    let (auth_key, _) = credentials(client, coordinator, email, password).await?;
+    Ok(auth_key)
+}
+
+/// The auth key and wrapping key of `email` with `password`, under the salt
+/// the coordinator keeps.
+async fn credentials(
+    client: &NodeClient,
+    coordinator: &str,
+    email: &str,
+    password: &str,
+) -> Result<([u8; 32], MessageKey), SignInError> {
+    let request = SaltRequest {
+        email: email.to_string(),
+    };
+    let salt: SaltResponse = read(post(client, coordinator, SALT_ROUTE, &request).await?).await?;
+    stretch(password, &salt.salt, salt.kdf)
 }
 
 /// The auth key and wrapping key `password` stretches into under `salt`.

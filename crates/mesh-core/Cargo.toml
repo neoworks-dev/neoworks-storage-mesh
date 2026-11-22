@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 blake3.workspace = true
+blind-rsa-signatures.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 serde.workspace = true
