@@ -6,8 +6,9 @@
 //! 2. Each chunk is sealed with the file's random key ([`encryption`]).
 //! 3. Each sealed chunk is cut into six pieces, any four of which rebuild it
 //!    ([`erasure`]).
-//! 4. Each piece goes to a different node, which sees only noise, and is kept
-//!    there for a lease the owner sets.
+//! 4. Each piece goes to a different node from a [`NodeList`], chosen so that
+//!    no operator or network holds too many ([`placement`]). The node sees
+//!    only noise and keeps it for a lease the owner sets.
 //!
 //! The [`Manifest`] that comes out holds the key and where every piece is.
 //! [`download`] uses it to fetch, rebuild and open the file again, [`renew`]
@@ -20,6 +21,9 @@ pub mod encryption;
 pub mod erasure;
 mod manifest;
 mod node_client;
+mod node_list;
+pub mod placement;
+mod random;
 mod renew;
 mod repair;
 mod upload;
@@ -28,6 +32,7 @@ pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHe
 pub use download::{DownloadError, download};
 pub use manifest::{ChunkRecord, Manifest, PlacedPiece};
 pub use node_client::{NodeClient, NodeRequestError};
+pub use node_list::{NodeInfo, NodeList, NodeListError};
 pub use renew::{RenewReport, renew};
 pub use repair::{ChunkRepair, REPAIR_AT, RepairReport, repair};
 pub use upload::{CHUNK_BYTES, UploadError, upload};

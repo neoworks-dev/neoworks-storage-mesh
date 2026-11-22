@@ -18,13 +18,15 @@ it into erasure-coded pieces and spread those over independent nodes.
 
 ## Status
 
-Early. A file can be stored on six nodes and read back while any two of them
-are down, have lost their pieces or return corrupted ones. Nodes keep each
-piece for a lease and delete it once the lease ends unless it is renewed,
-which is also how a file is deleted. An audit checks that the nodes still
-hold every piece, from a few random segments with Merkle proofs, and repair
-rebuilds lost pieces onto spare nodes. There are no coordinators or tokens
-yet, and nodes are named by hand; the issues track what comes next.
+Early. A file is spread over nodes chosen from a list, so that no operator,
+network or subnet holds more pieces of a chunk than it can lose, and it can be
+read back while any two of a chunk's nodes are down, have lost their pieces or
+return corrupted ones. Nodes keep each piece for a lease and delete it once
+the lease ends unless it is renewed, which is also how a file is deleted. An
+audit checks that the nodes still hold every piece, from a few random segments
+with Merkle proofs, and repair rebuilds lost pieces onto other nodes. There
+are no coordinators or tokens yet, so the node list is a file you write; the
+issues track what comes next.
 
 ## Layout
 
@@ -35,22 +37,33 @@ yet, and nodes are named by hand; the issues track what comes next.
 
 ## Try it
 
-Start six nodes, each in its own terminal or in the background:
+Start seven nodes in the background:
 
 ```sh
 cargo build --release
-for i in 1 2 3 4 5 6; do
+for i in 1 2 3 4 5 6 7; do
   target/release/mesh-node --listen 127.0.0.1:700$i --data data/node-$i &
 done
+```
+
+Write a node list. On one machine every node needs its own `operator` and
+`network`, or placement won't put more than two pieces of a chunk on them:
+
+```sh
+{
+  echo '['
+  for i in 1 2 3 4 5 6 7; do
+    comma=$([ $i -lt 7 ] && echo ,)
+    echo "  {\"url\": \"http://127.0.0.1:700$i\", \"operator\": \"op-$i\", \"network\": \"net-$i\"}$comma"
+  done
+  echo ']'
+} > nodes.json
 ```
 
 Store a file, stop two nodes and read it back:
 
 ```sh
-target/release/mesh put photo.jpg --manifest photo.manifest.json \
-  --node http://127.0.0.1:7001 --node http://127.0.0.1:7002 \
-  --node http://127.0.0.1:7003 --node http://127.0.0.1:7004 \
-  --node http://127.0.0.1:7005 --node http://127.0.0.1:7006
+target/release/mesh put photo.jpg --nodes nodes.json --manifest photo.manifest.json
 kill %2 %5
 target/release/mesh get photo.manifest.json photo-again.jpg
 ```
@@ -70,12 +83,11 @@ To check that the nodes still hold every piece, without downloading them:
 target/release/mesh audit photo.manifest.json
 ```
 
-When nodes have lost pieces, rebuild them onto other nodes. Repair updates
-the manifest with where the new pieces are:
+When nodes have lost pieces, rebuild them onto other nodes from the list.
+Repair updates the manifest with where the new pieces are:
 
 ```sh
-target/release/mesh-node --listen 127.0.0.1:7007 --data data/node-7 &
-target/release/mesh repair photo.manifest.json --spare-node http://127.0.0.1:7007
+target/release/mesh repair photo.manifest.json --nodes nodes.json
 ```
 
 ## License

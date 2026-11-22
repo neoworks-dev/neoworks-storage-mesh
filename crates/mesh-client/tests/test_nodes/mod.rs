@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 
 use mesh_client::erasure::TOTAL_PIECES;
+use mesh_client::{ChunkRecord, NodeInfo, NodeList, PlacedPiece};
 use mesh_node::{NodeSettings, PieceStore};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -69,4 +70,38 @@ pub async fn start_nodes(settings: NodeSettings) -> Vec<TestNode> {
 
 pub fn urls(nodes: &[TestNode]) -> Vec<String> {
     nodes.iter().map(|node| node.url.clone()).collect()
+}
+
+/// The piece of `chunk` that lives on the node at `url`.
+pub fn piece_on<'chunk>(chunk: &'chunk ChunkRecord, url: &str) -> &'chunk PlacedPiece {
+    chunk
+        .pieces
+        .iter()
+        .find(|piece| piece.node == url)
+        .expect("every test node holds one piece of every chunk")
+}
+
+/// Where in `chunk` the piece on the node at `url` sits.
+pub fn position_on(chunk: &ChunkRecord, url: &str) -> usize {
+    chunk
+        .pieces
+        .iter()
+        .position(|piece| piece.node == url)
+        .expect("every test node holds one piece of every chunk")
+}
+
+/// A node list of `nodes` in which every node has its own operator and
+/// network, so placement may use any of them for any chunk.
+pub fn node_list<'a>(nodes: impl IntoIterator<Item = &'a TestNode>) -> NodeList {
+    let nodes = nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| NodeInfo {
+            url: node.url.clone(),
+            operator: format!("operator-{index}"),
+            network: format!("network-{index}"),
+            weight: 1.0,
+        })
+        .collect();
+    NodeList { nodes }
 }

@@ -1,15 +1,17 @@
-//! `mesh`: stores a file on six nodes, keeps it stored and gets it back.
+//! `mesh`: stores a file on nodes from a list, keeps it stored and gets it
+//! back.
 //!
 //! ```sh
-//! mesh put photo.jpg --manifest photo.manifest.json \
-//!     --node http://127.0.0.1:7001 --node http://127.0.0.1:7002 … (six in all)
+//! mesh put photo.jpg --nodes nodes.json --manifest photo.manifest.json
 //! mesh renew photo.manifest.json --days 30
 //! mesh audit photo.manifest.json
-//! mesh repair photo.manifest.json --spare-node http://127.0.0.1:7007
+//! mesh repair photo.manifest.json --nodes nodes.json
 //! mesh get photo.manifest.json photo-again.jpg
 //! ```
 //!
-//! The manifest holds the file's key: anyone with it can read the file.
+//! `nodes.json` lists the nodes to choose from; `mesh_client::NodeList`
+//! describes it. The manifest holds the file's key: anyone with it can read
+//! the file.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,7 +19,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use mesh_client::erasure::DATA_PIECES;
-use mesh_client::{AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, PieceHealth};
+use mesh_client::{AUDIT_DEADLINE, ChunkRepair, Manifest, NodeClient, NodeList, PieceHealth};
 
 #[derive(Parser)]
 struct Arguments {
@@ -27,15 +29,16 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Encrypts a file, spreads it over six nodes and writes its manifest.
+    /// Encrypts a file, spreads it over nodes from the list and writes its
+    /// manifest.
     Put {
         file: PathBuf,
+        /// The JSON list of nodes to choose from.
+        #[arg(long)]
+        nodes: PathBuf,
         /// Where to write the manifest. Keep it private: it holds the key.
         #[arg(long)]
         manifest: PathBuf,
-        /// A node's base URL; give exactly six.
-        #[arg(long = "node", required = true)]
-        nodes: Vec<String>,
         /// How many days the nodes keep the file unless it is renewed.
         #[arg(long, default_value_t = 30)]
         days: u64,
@@ -48,14 +51,14 @@ enum Command {
     },
     /// Checks that the nodes still hold every piece, without downloading them.
     Audit { manifest: PathBuf },
-    /// Audits a file, rebuilds the pieces that are lost onto spare nodes and
-    /// updates the manifest.
+    /// Audits a file, rebuilds the pieces that are lost onto other nodes from
+    /// the list and updates the manifest.
     Repair {
         manifest: PathBuf,
-        /// A node that may take rebuilt pieces; give as many as you like.
-        #[arg(long = "spare-node", required = true)]
-        spare_nodes: Vec<String>,
-        /// How many days the spare nodes keep the rebuilt pieces.
+        /// The JSON list of nodes to choose from.
+        #[arg(long)]
+        nodes: PathBuf,
+        /// How many days the new nodes keep the rebuilt pieces.
         #[arg(long, default_value_t = 30)]
         days: u64,
     },
@@ -69,17 +72,17 @@ async fn main() -> anyhow::Result<()> {
     match Arguments::parse().command {
         Command::Put {
             file,
-            manifest,
             nodes,
+            manifest,
             days,
-        } => put(&client, &file, &manifest, &nodes, days).await,
+        } => put(&client, &file, &nodes, &manifest, days).await,
         Command::Renew { manifest, days } => renew(&client, &manifest, days).await,
         Command::Audit { manifest } => audit(&client, &manifest).await,
         Command::Repair {
             manifest,
-            spare_nodes,
+            nodes,
             days,
-        } => repair(&client, &manifest, &spare_nodes, days).await,
+        } => repair(&client, &manifest, &nodes, days).await,
         Command::Get { manifest, output } => get(&client, &manifest, &output).await,
     }
 }
@@ -87,12 +90,13 @@ async fn main() -> anyhow::Result<()> {
 async fn put(
     client: &NodeClient,
     file: &Path,
+    nodes_path: &Path,
     manifest_path: &Path,
-    nodes: &[String],
     days: u64,
 ) -> anyhow::Result<()> {
+    let list = NodeList::read(nodes_path)?;
     let bytes = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let manifest = mesh_client::upload(client, nodes, &bytes, days_to_duration(days)).await?;
+    let manifest = mesh_client::upload(client, &list, &bytes, days_to_duration(days)).await?;
     write_manifest(manifest_path, &manifest)?;
     println!(
         "stored {} bytes in {} chunks for {days} days, manifest in {}",
@@ -149,13 +153,14 @@ async fn audit(client: &NodeClient, manifest_path: &Path) -> anyhow::Result<()> 
 async fn repair(
     client: &NodeClient,
     manifest_path: &Path,
-    spare_nodes: &[String],
+    nodes_path: &Path,
     days: u64,
 ) -> anyhow::Result<()> {
+    let list = NodeList::read(nodes_path)?;
     let mut manifest = read_manifest(manifest_path)?;
     let audit = mesh_client::audit(client, &manifest, AUDIT_DEADLINE).await;
     let lease = days_to_duration(days);
-    let report = mesh_client::repair(client, &mut manifest, &audit, spare_nodes, lease).await;
+    let report = mesh_client::repair(client, &mut manifest, &audit, &list, lease).await;
     let mut any_moved = false;
     for (index, outcome) in report.chunks.iter().enumerate() {
         match outcome {
@@ -165,7 +170,7 @@ async fn repair(
                 any_moved = true;
             }
             ChunkRepair::Partly { replaced, unplaced } => {
-                println!("chunk {index}: rebuilt {replaced} pieces, no spare node for {unplaced}");
+                println!("chunk {index}: rebuilt {replaced} pieces, no node took {unplaced}");
                 any_moved |= *replaced > 0;
             }
             ChunkRepair::Lost { fetched } => {

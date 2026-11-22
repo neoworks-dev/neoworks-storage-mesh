@@ -18,6 +18,7 @@ use mesh_core::merkle::{self, MerkleHash, SegmentProof};
 use crate::erasure;
 use crate::manifest::{Manifest, PlacedPiece};
 use crate::node_client::{NodeClient, NodeRequestError};
+use crate::random::random_u32;
 
 /// Segments asked for per piece. A node that kept only half of a piece passes
 /// one audit with a chance of (1/2)^8, about 0.4%, and audits repeat.
@@ -136,12 +137,6 @@ fn random_segments(segment_count: u32) -> Vec<u32> {
         segments.insert(random_u32() % segment_count);
     }
     segments.into_iter().collect()
-}
-
-fn random_u32() -> u32 {
-    // The operating system's random source also made the file's keys; a
-    // device without one cannot have stored a file in the first place.
-    getrandom::u32().expect("the operating system's random source works")
 }
 
 #[cfg(test)]

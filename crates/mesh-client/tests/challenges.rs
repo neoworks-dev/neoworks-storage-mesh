@@ -8,7 +8,7 @@ use std::time::Duration;
 use mesh_client::{Manifest, NodeClient, NodeRequestError, PlacedPiece, upload};
 use mesh_node::NodeSettings;
 use reqwest::StatusCode;
-use test_nodes::{TestNode, start_nodes, urls};
+use test_nodes::{TestNode, node_list, piece_on, start_nodes};
 
 const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -23,7 +23,7 @@ async fn stored_file() -> (Vec<TestNode>, Manifest) {
     let nodes = start_nodes(NodeSettings::default()).await;
     let manifest = upload(
         &NodeClient::new().unwrap(),
-        &urls(&nodes),
+        &node_list(&nodes),
         &sample_file(),
         LEASE,
     )
@@ -68,7 +68,7 @@ async fn an_honest_node_proves_it_holds_its_pieces() {
 #[tokio::test]
 async fn a_node_with_corrupted_pieces_cannot_prove_them() {
     let (nodes, manifest) = stored_file().await;
-    let piece = &manifest.chunks[0].pieces[2];
+    let piece = piece_on(&manifest.chunks[0], &nodes[2].url);
 
     nodes[2].corrupt_all_pieces();
     let proofs = NodeClient::new()
@@ -88,7 +88,7 @@ async fn a_node_with_corrupted_pieces_cannot_prove_them() {
 #[tokio::test]
 async fn a_node_that_lost_a_piece_says_so() {
     let (nodes, manifest) = stored_file().await;
-    let piece = &manifest.chunks[0].pieces[3];
+    let piece = piece_on(&manifest.chunks[0], &nodes[3].url);
 
     nodes[3].lose_all_pieces();
     let answer = NodeClient::new()

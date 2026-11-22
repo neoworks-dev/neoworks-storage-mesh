@@ -18,6 +18,8 @@ use crate::audit::{AuditReport, ChunkAudit, PieceHealth};
 use crate::erasure::{cut, rebuild};
 use crate::manifest::{ChunkRecord, Manifest};
 use crate::node_client::NodeClient;
+use crate::node_list::NodeList;
+use crate::placement::store_pieces;
 
 /// A chunk is repaired once it has this many healthy pieces or fewer.
 ///
@@ -34,7 +36,8 @@ pub enum ChunkRepair {
     Intact,
     /// Every unhealthy piece was rebuilt and stored on a new node.
     Repaired { replaced: usize },
-    /// Some pieces could not be placed, because no spare node took them.
+    /// Some pieces could not be placed, because no node the rules allow took
+    /// them.
     Partly { replaced: usize, unplaced: usize },
     /// Fewer than four pieces could be fetched, so the chunk can't be rebuilt.
     Lost { fetched: usize },
@@ -47,22 +50,23 @@ pub struct RepairReport {
 }
 
 /// Repairs the chunks of `manifest` that `audit` found weak, storing rebuilt
-/// pieces on `spare_nodes` for `lease`, and updates `manifest` with their new
-/// nodes.
+/// pieces on nodes chosen from `list` for `lease`, and updates `manifest`
+/// with their new nodes.
 ///
-/// A spare node never gets a second piece of the same chunk, and neither does
-/// a node that already holds or failed one. The unhealthy pieces left on old
-/// nodes are not deleted; nobody renews them, so they expire.
+/// The new nodes follow the placement rules together with the nodes that
+/// still hold healthy pieces, and a node that failed a piece is never chosen
+/// again for that chunk. The unhealthy pieces left on old nodes are not
+/// deleted; nobody renews them, so they expire.
 pub async fn repair(
     client: &NodeClient,
     manifest: &mut Manifest,
     audit: &AuditReport,
-    spare_nodes: &[String],
+    list: &NodeList,
     lease: Duration,
 ) -> RepairReport {
     let mut chunks = Vec::with_capacity(manifest.chunks.len());
     for (chunk, chunk_audit) in manifest.chunks.iter_mut().zip(&audit.chunks) {
-        chunks.push(repair_chunk(client, chunk, chunk_audit, spare_nodes, lease).await);
+        chunks.push(repair_chunk(client, chunk, chunk_audit, list, lease).await);
     }
     RepairReport { chunks }
 }
@@ -71,7 +75,7 @@ async fn repair_chunk(
     client: &NodeClient,
     chunk: &mut ChunkRecord,
     chunk_audit: &ChunkAudit,
-    spare_nodes: &[String],
+    list: &NodeList,
     lease: Duration,
 ) -> ChunkRepair {
     if chunk_audit.healthy() > REPAIR_AT {
@@ -83,24 +87,33 @@ async fn repair_chunk(
         return ChunkRepair::Lost { fetched };
     };
     let rebuilt_pieces = cut(&sealed);
-    let mut replaced = 0;
+    let mut lost_indexes = Vec::new();
     let mut unplaced = 0;
     for (index, health) in chunk_audit.pieces.iter().enumerate() {
         if *health == PieceHealth::Healthy {
             continue;
         }
-        let bytes = &rebuilt_pieces[index];
         // Cutting is deterministic, so this holds unless the manifest and the
         // pieces don't belong together. Storing the bytes anyway would put a
         // piece where the manifest would never find it.
-        if PieceId::of(bytes) != chunk.pieces[index].id {
+        if PieceId::of(&rebuilt_pieces[index]) != chunk.pieces[index].id {
             eprintln!("rebuilt piece {index} does not match the manifest");
             unplaced += 1;
             continue;
         }
-        match place_piece(client, chunk, bytes, spare_nodes, lease).await {
-            Some(node) => {
-                chunk.pieces[index].node = node;
+        lost_indexes.push(index);
+    }
+    let lost_pieces: Vec<Vec<u8>> = lost_indexes
+        .iter()
+        .map(|&index| rebuilt_pieces[index].clone())
+        .collect();
+    let (holding, failed) = nodes_by_health(chunk, chunk_audit);
+    let placed = store_pieces(client, list, &lost_pieces, &holding, &failed, lease).await;
+    let mut replaced = 0;
+    for (index, piece) in lost_indexes.into_iter().zip(placed) {
+        match piece {
+            Some(piece) => {
+                chunk.pieces[index].node = piece.node;
                 replaced += 1;
             }
             None => unplaced += 1,
@@ -111,6 +124,24 @@ async fn repair_chunk(
     } else {
         ChunkRepair::Partly { replaced, unplaced }
     }
+}
+
+/// The URLs of the nodes of `chunk` whose pieces are healthy, and of those
+/// whose pieces are not.
+fn nodes_by_health<'chunk>(
+    chunk: &'chunk ChunkRecord,
+    chunk_audit: &ChunkAudit,
+) -> (Vec<&'chunk str>, Vec<&'chunk str>) {
+    let mut healthy = Vec::new();
+    let mut unhealthy = Vec::new();
+    for (piece, health) in chunk.pieces.iter().zip(&chunk_audit.pieces) {
+        if *health == PieceHealth::Healthy {
+            healthy.push(piece.node.as_str());
+        } else {
+            unhealthy.push(piece.node.as_str());
+        }
+    }
+    (healthy, unhealthy)
 }
 
 /// The pieces the audit found healthy, fetched again; every other piece is
@@ -133,24 +164,4 @@ async fn fetch_healthy_pieces(
             client.get(&piece.node, &piece.id).await.ok().flatten()
         });
     join_all(fetches).await
-}
-
-/// Stores `bytes` on the first spare node that takes them and doesn't already
-/// hold a piece of `chunk`, and returns that node.
-async fn place_piece(
-    client: &NodeClient,
-    chunk: &ChunkRecord,
-    bytes: &[u8],
-    spare_nodes: &[String],
-    lease: Duration,
-) -> Option<String> {
-    let id = PieceId::of(bytes);
-    let is_free = |node: &&String| chunk.pieces.iter().all(|piece| piece.node != **node);
-    for node in spare_nodes.iter().filter(is_free) {
-        match client.put(node, &id, bytes.to_vec(), lease).await {
-            Ok(_) => return Some(node.clone()),
-            Err(error) => eprintln!("{error}"),
-        }
-    }
-    None
 }
