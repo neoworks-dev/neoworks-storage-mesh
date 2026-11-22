@@ -6,9 +6,12 @@
 //! uptime. Clients download the snapshot whole and check its signature
 //! against the coordinator keys they start with.
 //!
-//! Storage tokens and sign-in come later. The `mesh-coordinator` binary runs
+//! People also sign in here with an email and a password; the coordinator
+//! keeps only what checks a sign-in and the account's secret locked under a
+//! key it never sees. Storage tokens come later. The `mesh-coordinator` binary runs
 //! one; tests start coordinators in-process through [`serve`].
 
+mod accounts;
 mod clock;
 mod coordinator_key;
 mod probe;
@@ -16,6 +19,7 @@ mod publish;
 mod registry;
 mod routes;
 mod settings;
+mod sign_in_routes;
 
 pub use coordinator_key::CoordinatorKeyError;
 pub use settings::CoordinatorSettings;
@@ -29,20 +33,23 @@ use mesh_core::signed::SigningKey;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
+use crate::accounts::Accounts;
 use crate::registry::Registry;
 use crate::routes::Coordinator;
 
 /// How long the coordinator waits for a node to answer a check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A coordinator's registry and key, from its data directory:
+/// A coordinator's registry, accounts and key, from its data directory:
 ///
 /// ```text
 /// <data>/coordinator.key      the key snapshots are signed with
 /// <data>/registry.sqlite3     node records and check results
+/// <data>/accounts.sqlite3     what checking a sign-in needs
 /// ```
 pub struct CoordinatorData {
     registry: Registry,
+    accounts: Accounts,
     key: SigningKey,
 }
 
@@ -60,9 +67,15 @@ impl CoordinatorData {
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, OpenError> {
         let directory = directory.as_ref();
         std::fs::create_dir_all(directory).map_err(CoordinatorKeyError::from)?;
+        let key = coordinator_key::load_or_create(directory)?;
+        let fake_salt_key = blake3::derive_key(
+            "neoworks-mesh coordinator fake salt key v1",
+            &key.to_bytes(),
+        );
         Ok(CoordinatorData {
             registry: Registry::open(directory)?,
-            key: coordinator_key::load_or_create(directory)?,
+            accounts: Accounts::open(directory, fake_salt_key)?,
+            key,
         })
     }
 
@@ -87,6 +100,7 @@ pub async fn serve(
     let latest = Arc::new(RwLock::new(None));
     let coordinator = Coordinator {
         registry: registry.clone(),
+        accounts: Arc::new(data.accounts),
         latest: latest.clone(),
         http: http.clone(),
         max_record_age_seconds: settings.max_record_age.as_secs(),

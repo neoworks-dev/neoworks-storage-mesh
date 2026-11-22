@@ -8,8 +8,8 @@
 //! - the message key that seals where the pointer leads.
 //!
 //! Knowing one derived key reveals nothing about the secret or the others.
-//! How the secret reaches a new device, from a password or a paired device,
-//! is the sign-in issue's; here it is a hex string in a file.
+//! The secret reaches a new device by signing in with an email and password
+//! ([`sign_in`](crate::sign_in)), or as a hex string in a file.
 
 use mesh_core::pointer::SigningKey;
 
@@ -37,6 +37,11 @@ impl Account {
     /// The account whose secret is `secret`.
     pub fn from_secret(secret: [u8; 32]) -> Self {
         Account { secret }
+    }
+
+    /// The secret itself, for sealing it under a password.
+    pub(crate) fn secret(&self) -> [u8; 32] {
+        self.secret
     }
 
     /// The secret as 64 hex digits, for keeping it in a file.

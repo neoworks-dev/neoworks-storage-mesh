@@ -1,5 +1,5 @@
 //! The coordinator's HTTP interface: nodes register, clients fetch the node
-//! list.
+//! list, and people sign up and sign in ([`sign_in_routes`]).
 
 use std::sync::Arc;
 
@@ -12,15 +12,18 @@ use mesh_core::node_list::NodeRecord;
 use mesh_core::protocol::{NODE_LIST_ROUTE, REGISTER_ROUTE};
 use mesh_core::signed::Signed;
 
+use crate::accounts::Accounts;
 use crate::clock::unix_now;
 use crate::probe::answers_as;
 use crate::publish::LatestSnapshot;
 use crate::registry::{Registered, Registry};
+use crate::sign_in_routes;
 
 /// What every request handler needs.
 #[derive(Clone)]
 pub struct Coordinator {
     pub registry: Arc<Registry>,
+    pub accounts: Arc<Accounts>,
     pub latest: Arc<LatestSnapshot>,
     pub http: reqwest::Client,
     /// How far a record's signing time may be from now, in seconds.
@@ -32,6 +35,7 @@ pub fn router(coordinator: Coordinator) -> Router {
     Router::new()
         .route(REGISTER_ROUTE, post(register))
         .route(NODE_LIST_ROUTE, get(node_list))
+        .merge(sign_in_routes::routes())
         .with_state(coordinator)
 }
 

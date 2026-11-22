@@ -1,5 +1,6 @@
 //! The `mesh` commands that work through an account's index instead of
-//! manifest files: `account-new`, `store`, `ls`, `fetch` and `renew-all`.
+//! manifest files: `account-new`, `sign-up`, `sign-in`, `store`, `ls`,
+//! `fetch` and `renew-all`.
 //!
 //! The account's secret lives in a file, and this device's copy of the index
 //! in another, so that only what changed since the last run is fetched.
@@ -12,6 +13,7 @@ use clap::Args;
 use mesh_client::account::Account;
 use mesh_client::index::{Index, Session, unix_now};
 use mesh_client::{NodeClient, upload};
+use mesh_core::sign_in::KdfParams;
 
 use crate::{NodeListArguments, days_to_duration, download_to, load_node_list};
 
@@ -37,7 +39,13 @@ pub struct AccountArguments {
 
 /// Writes a new account secret to `path`, readable by its owner only.
 pub fn account_new(path: &Path) -> anyhow::Result<()> {
-    let account = Account::generate();
+    write_account(path, &Account::generate())?;
+    println!("created a new account in {}", path.display());
+    Ok(())
+}
+
+/// Writes `account`'s secret to `path`, readable by its owner only.
+fn write_account(path: &Path, account: &Account) -> anyhow::Result<()> {
     let mut options = std::fs::OpenOptions::new();
     // Never overwrite an account: its secret is the only way to its files.
     options.write(true).create_new(true);
@@ -47,8 +55,62 @@ pub fn account_new(path: &Path) -> anyhow::Result<()> {
         .open(path)
         .with_context(|| format!("creating {}", path.display()))?;
     writeln!(file, "{}", account.to_hex())?;
-    println!("created a new account in {}", path.display());
     Ok(())
+}
+
+/// Creates an account for `email` on `coordinator`, with the secret in
+/// `account_path`, made first if it does not exist.
+pub async fn sign_up(
+    client: &NodeClient,
+    coordinator: &str,
+    email: &str,
+    account_path: &Path,
+) -> anyhow::Result<()> {
+    if !account_path.exists() {
+        account_new(account_path)?;
+    }
+    let account = read_account(account_path)?;
+    let password = read_password()?;
+    mesh_client::sign_in::sign_up(
+        client,
+        coordinator,
+        email,
+        &password,
+        &account,
+        KdfParams::DEFAULT,
+    )
+    .await?;
+    println!("signed up as {email}");
+    Ok(())
+}
+
+/// Signs in as `email` on `coordinator` and writes the account's secret to
+/// `account_path`, which must not exist yet.
+pub async fn sign_in(
+    client: &NodeClient,
+    coordinator: &str,
+    email: &str,
+    account_path: &Path,
+) -> anyhow::Result<()> {
+    let password = read_password()?;
+    let account = mesh_client::sign_in::sign_in(client, coordinator, email, &password).await?;
+    write_account(account_path, &account)?;
+    println!(
+        "signed in as {email}; the account is in {}",
+        account_path.display()
+    );
+    Ok(())
+}
+
+/// A password, as one line on standard input, so it never shows up in the
+/// process list or the shell's history.
+fn read_password() -> anyhow::Result<String> {
+    eprint!("password: ");
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading the password")?;
+    Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// Stores `file` under `name` and records it in the index.

@@ -14,6 +14,7 @@ mesh-core = { path = "crates/mesh-core" }
 mesh-node = { path = "crates/mesh-node" }
 
 anyhow = "1"
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 axum = "0.8"
 blake3 = "1"
 chacha20poly1305 = "0.11"

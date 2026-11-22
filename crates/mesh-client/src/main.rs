@@ -76,6 +76,25 @@ enum Command {
         #[arg(long, default_value = "account.key")]
         account: PathBuf,
     },
+    /// Creates a sign-in for the account with an email and a password, read
+    /// from standard input; creates the account first if needed.
+    SignUp {
+        email: String,
+        /// The sign-in coordinator.
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long, default_value = "account.key")]
+        account: PathBuf,
+    },
+    /// Signs in on a new device and writes the account's secret.
+    SignIn {
+        email: String,
+        /// The sign-in coordinator.
+        #[arg(long)]
+        coordinator: String,
+        #[arg(long, default_value = "account.key")]
+        account: PathBuf,
+    },
     /// Stores a file and records it in the account's index.
     Store {
         file: PathBuf,
@@ -154,6 +173,16 @@ async fn main() -> anyhow::Result<()> {
         } => repair(&client, &manifest, &nodes, days).await,
         Command::Get { manifest, output } => get(&client, &manifest, &output).await,
         Command::AccountNew { account } => account_commands::account_new(&account),
+        Command::SignUp {
+            email,
+            coordinator,
+            account,
+        } => account_commands::sign_up(&client, &coordinator, &email, &account).await,
+        Command::SignIn {
+            email,
+            coordinator,
+            account,
+        } => account_commands::sign_in(&client, &coordinator, &email, &account).await,
         Command::Store {
             file,
             name,

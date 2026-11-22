@@ -46,6 +46,7 @@ pub mod pointers;
 mod random;
 mod renew;
 mod repair;
+pub mod sign_in;
 mod upload;
 pub mod version_graph;
 

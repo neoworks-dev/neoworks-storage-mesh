@@ -141,7 +141,18 @@ example weekly. It renews every file, the index and its pointer with one
 request per node, and warns about files that lost too many pieces.
 
 `account.key` holds the secret: keep it private, since it opens every file
-of the account. `mesh-index.json` is this device's copy of the index;
+of the account. To get it onto another device without copying the file,
+sign up with an email and password once, then sign in on the new device; the
+password is read from standard input:
+
+```sh
+target/release/mesh sign-up ana@example.org --coordinator http://127.0.0.1:7000
+target/release/mesh sign-in ana@example.org --coordinator http://127.0.0.1:7000 \
+  --account phone.key
+```
+
+The coordinator keeps the secret locked under a key derived from the
+password, which it never sees. `mesh-index.json` is this device's copy of the index;
 `--index` names another, as a second device would have.
 
 ## License
