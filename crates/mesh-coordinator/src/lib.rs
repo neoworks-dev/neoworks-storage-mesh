@@ -3,8 +3,10 @@
 //! Nodes register a record signed with their own key. The coordinator checks
 //! that each node answers at the address it claims, keeps checking that it is
 //! up, times how fast it uploads and counts how often nodes disappear for
-//! good. Every hour it publishes a signed snapshot of all nodes with their
-//! uptime and bandwidth, and the loss rate; once a day it works out what
+//! good. It keeps a small piece of its own on every node and audits it, so a
+//! node that answers but threw its pieces away shows. Every hour it
+//! publishes a signed snapshot of all nodes with their uptime, audit results
+//! and bandwidth, and the loss rate; once a day it works out what
 //! storage costs on each class of nodes from that snapshot and signs the
 //! prices too. Clients download the snapshot whole and check its signature
 //! against the coordinator keys they start with.
@@ -26,6 +28,8 @@
 //! through [`serve`].
 
 mod accounts;
+mod audit_log;
+mod audits;
 mod chunk_book;
 mod chunk_routes;
 mod clock;
@@ -62,6 +66,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::accounts::Accounts;
+use crate::audit_log::AuditLog;
+use crate::audits::Auditor;
 use crate::chunk_book::ChunkBook;
 use crate::earnings::Earnings;
 use crate::expiry_warnings::ExpiryWarnings;
@@ -86,6 +92,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 /// <data>/prices.sqlite3        the signed price table of every day
 /// <data>/earnings.sqlite3      what operators earned and the repair pool
 /// <data>/chunks.sqlite3        chunks registered for repair
+/// <data>/audits.sqlite3        audit pieces on nodes and challenge results
 /// <data>/accounts.sqlite3      what checking a sign-in needs
 /// <data>/tokens.sqlite3        token keys, issued counts, spent tokens
 /// <data>/warnings.sqlite3      expiry warnings sent
@@ -97,6 +104,7 @@ pub struct CoordinatorData {
     prices: PriceBook,
     earnings: Earnings,
     chunks: ChunkBook,
+    audits: AuditLog,
     accounts: Accounts,
     tokens: TokenIssuer,
     warnings: ExpiryWarnings,
@@ -130,6 +138,7 @@ impl CoordinatorData {
             prices: PriceBook::open(directory)?,
             earnings: Earnings::open(directory)?,
             chunks: ChunkBook::open(directory)?,
+            audits: AuditLog::open(directory)?,
             accounts: Accounts::open(directory, fake_salt_key)?,
             tokens: TokenIssuer::open(directory)?,
             warnings: ExpiryWarnings::open(directory).map_err(OpenError::Warnings)?,
@@ -177,6 +186,13 @@ pub async fn serve(
         Locator::empty()
     });
     let tokens = Arc::new(data.tokens);
+    let audits = Arc::new(data.audits);
+    let auditor = Auditor {
+        http: http.clone(),
+        registry: registry.clone(),
+        log: audits.clone(),
+        tokens: tokens.clone(),
+    };
     let latest = Arc::new(RwLock::new(None));
     let prices = Arc::new(RwLock::new(None));
     let chunks = Arc::new(data.chunks);
@@ -215,9 +231,10 @@ pub async fn serve(
         () = probe::probe_forever(http, locator, registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = speed_test::measure_forever(registry.clone(), measurements.clone(), settings.clone()) => Ok(()),
         () = repairs::repair_forever(repairer, settings.clone()) => Ok(()),
-        () = earnings::pay_out_forever(earnings, registry.clone(), tokens.clone(), settings.clone()) => Ok(()),
+        () = audits::audit_forever(auditor, settings.clone()) => Ok(()),
+        () = earnings::pay_out_forever(earnings, registry.clone(), audits.clone(), tokens.clone(), settings.clone()) => Ok(()),
         () = expiry_warnings::warn_forever(data.warnings, tokens, settings.clone()) => Ok(()),
         () = price_book::price_forever(data.prices, data.key.clone(), latest.clone(), prices, settings.clone()) => Ok(()),
-        () = publish::publish_forever(registry, measurements, earnings_for_publish, data.key, latest, settings) => Ok(()),
+        () = publish::publish_forever(registry, measurements, earnings_for_publish, audits, data.key, latest, settings) => Ok(()),
     }
 }

@@ -3,8 +3,8 @@
 //! When a node spends a paid token, the coordinator holds the token's value
 //! instead of crediting it at once, and pays it out to the node's operator
 //! bit by bit over the month the tab lasts, for as long as the node stays
-//! up. What a node that went down did not earn goes to repairing what it
-//! held. Only buying from a coordinator creates tokens; hosting moves them
+//! up and passes the coordinator's audits. What a node that went down or
+//! failed its audits did not earn goes to repairing what it held. Only buying from a coordinator creates tokens; hosting moves them
 //! from users to operators, and tokens never turn back into money.
 //!
 //! A node names its operator's account with a [`OperatorClaim`] signed with

@@ -51,6 +51,8 @@ pub struct CoordinatorSettings {
     /// (`mesh_core::chunk_registry::responsible_coordinator`). `None` keeps
     /// every chunk, as the only coordinator does.
     pub coordinators: Option<CoordinatorList>,
+    /// How often every node is challenged for the coordinator's audit piece.
+    pub audit_interval: Duration,
     /// DB-IP's "IP to City Lite" CSV, which nodes are located in
     /// ([`crate::locate`]); without it, no node has a country.
     pub city_csv: Option<PathBuf>,
@@ -76,10 +78,11 @@ impl Default for CoordinatorSettings {
     /// has it; uptime over one day; a speed test every hour, with bandwidth
     /// over a week; nodes lost after a week of silence, counted over 90
     /// days; records at most ten minutes off; 40 allowance tokens per account
-    /// and month, and no own nodes; earnings paid out every hour; chunks
-    /// looked over every five minutes, with an hour's wait while a spare is
-    /// left, and every chunk kept; no tables to locate nodes in; warnings a week into the month and three
-    /// days before the end, looked for every hour.
+    /// and month, and no own nodes; earnings paid out and nodes audited every
+    /// hour; chunks looked over every five minutes, with an hour's wait while
+    /// a spare is left, and every chunk kept; no tables to locate nodes in;
+    /// warnings a week into the month and three days before the end, looked
+    /// for every hour.
     fn default() -> Self {
         CoordinatorSettings {
             probe_interval: Duration::from_secs(5 * 60),
@@ -96,6 +99,7 @@ impl Default for CoordinatorSettings {
             repair_interval: Duration::from_secs(5 * 60),
             repair_delay: Duration::from_secs(60 * 60),
             coordinators: None,
+            audit_interval: Duration::from_secs(60 * 60),
             city_csv: None,
             asn_tsv: None,
             location: None,

@@ -249,6 +249,7 @@ mod tests {
         ListedNode {
             record: Signed::sign(&key, record),
             uptime_permille,
+            audit_pass_permille: None,
             bandwidth_bits_per_second: bits_per_second,
             used_bytes: Some(used),
             takes_allowance: false,

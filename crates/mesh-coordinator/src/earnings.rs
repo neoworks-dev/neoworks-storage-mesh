@@ -12,7 +12,8 @@
 //!   repairing what they held.
 //!
 //! [`Earnings::settle`] moves what came due since the last time either to
-//! the node or to the repair pool, depending on whether the node was up;
+//! the node or to the repair pool, depending on whether the node was up and
+//! passed its audits;
 //! [`pay_out`] credits whole tokens to operators' balances.
 
 use std::collections::HashSet;
@@ -25,6 +26,8 @@ use mesh_core::tokens::MICROTOKENS_PER_TOKEN;
 use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
+use crate::audit_log::AuditLog;
+use crate::audits::passes_audits;
 use crate::clock::unix_now;
 use crate::registry::Registry;
 use crate::settings::CoordinatorSettings;
@@ -33,6 +36,11 @@ use crate::token_issuer::TokenIssuer;
 /// The uptime a node needs over the last day to earn that day, in
 /// thousandths: the same as the least reliable price class.
 const EARNING_UPTIME_PERMILLE: u16 = 950;
+
+/// The share of audits a node needs to pass over the same span to earn, in
+/// thousandths. With an audit an hour, a day has 24: one lost to a network
+/// hiccup still earns, two failures do not.
+const EARNING_AUDIT_PERMILLE: u16 = 950;
 
 /// Held values, unpaid earnings, operators and the repair pool.
 pub struct Earnings {
@@ -314,12 +322,16 @@ fn due_by(total: u64, start: u64, end: u64, now: u64) -> u64 {
     (u128::from(total) * u128::from(elapsed) / u128::from(end - start)) as u64
 }
 
-/// Settles what came due, counting a node as up when it answered at least
-/// [`EARNING_UPTIME_PERMILLE`] of the checks over the uptime window, and
-/// credits whole tokens to operators.
+/// Settles what came due and credits whole tokens to operators.
+///
+/// A node earns its share when, over the uptime window, it answered at least
+/// [`EARNING_UPTIME_PERMILLE`] of the checks and passed at least
+/// [`EARNING_AUDIT_PERMILLE`] of the coordinator's audits. Uptime alone
+/// would pay a node that answers checks but threw its pieces away.
 pub async fn pay_out(
     earnings: &Earnings,
     registry: &Registry,
+    audits: &AuditLog,
     tokens: &TokenIssuer,
     settings: &CoordinatorSettings,
     now: u64,
@@ -328,7 +340,8 @@ pub async fn pay_out(
     let mut up = HashSet::new();
     for node_id in earnings.held_nodes().await? {
         let uptime = registry.uptime_permille(&node_id, since).await?;
-        if uptime.is_some_and(|permille| permille >= EARNING_UPTIME_PERMILLE) {
+        let is_up = uptime.is_some_and(|permille| permille >= EARNING_UPTIME_PERMILLE);
+        if is_up && passes_audits(audits, &node_id, since, EARNING_AUDIT_PERMILLE).await? {
             up.insert(node_id);
         }
     }
@@ -346,14 +359,24 @@ pub async fn pay_out(
 pub async fn pay_out_forever(
     earnings: Arc<Earnings>,
     registry: Arc<Registry>,
+    audits: Arc<AuditLog>,
     tokens: Arc<TokenIssuer>,
     settings: CoordinatorSettings,
 ) {
     let mut timer = tokio::time::interval(settings.earnings_interval);
     loop {
         timer.tick().await;
+        let paid = pay_out(
+            &earnings,
+            &registry,
+            &audits,
+            &tokens,
+            &settings,
+            unix_now(),
+        )
+        .await;
         // A failed round leaves everything held; the next one catches up.
-        if let Err(error) = pay_out(&earnings, &registry, &tokens, &settings, unix_now()).await {
+        if let Err(error) = paid {
             eprintln!("earnings: {error}");
         }
     }
@@ -415,6 +438,46 @@ mod tests {
         assert_eq!(earnings.unpaid(&node(1)).await.unwrap(), 400);
         assert_eq!(earnings.repair_pool().await.unwrap(), 600);
         assert!(earnings.held_nodes().await.unwrap().is_empty());
+    }
+
+    /// What a node that was up throughout earned of 1,000 millionths held for
+    /// it, and what went to the repair pool, when it passed `passed` audits
+    /// and failed `failed`.
+    async fn earned_with_audits(passed: usize, failed: usize) -> (u64, u64) {
+        let directory = tempfile::tempdir().unwrap();
+        let earnings = Earnings::open(directory.path()).unwrap();
+        let registry = Registry::open(directory.path()).unwrap();
+        let audits = AuditLog::open(directory.path()).unwrap();
+        let tokens = TokenIssuer::open(directory.path()).unwrap();
+        registry.record_probe(&node(1), 50, true).await.unwrap();
+        for _ in 0..passed {
+            audits.record(&node(1), 50, true).await.unwrap();
+        }
+        for _ in 0..failed {
+            audits.record(&node(1), 50, false).await.unwrap();
+        }
+        earnings.hold(&node(1), 1_000, 0, 100).await.unwrap();
+
+        let settings = CoordinatorSettings::default();
+        pay_out(&earnings, &registry, &audits, &tokens, &settings, 100)
+            .await
+            .unwrap();
+
+        (
+            earnings.unpaid(&node(1)).await.unwrap(),
+            earnings.repair_pool().await.unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_node_that_is_up_earns_only_while_it_passes_audits() {
+        assert_eq!(earned_with_audits(24, 1).await, (1_000, 0));
+        assert_eq!(earned_with_audits(23, 2).await, (0, 1_000));
+    }
+
+    #[tokio::test]
+    async fn a_node_never_audited_earns_nothing() {
+        assert_eq!(earned_with_audits(0, 0).await, (0, 1_000));
     }
 
     #[tokio::test]

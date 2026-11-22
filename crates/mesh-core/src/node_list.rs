@@ -76,6 +76,12 @@ pub struct ListedNode {
     /// day, in thousandths. An integer, so the snapshot's JSON is the same
     /// on every machine.
     pub uptime_permille: u16,
+    /// The share of the coordinator's audits the node passed over the last
+    /// day, in thousandths, or `None` when the coordinator could not audit
+    /// it. The coordinator keeps a piece of its own on every node and asks
+    /// for proofs of it, so a node that answers checks but threw its pieces
+    /// away shows here.
+    pub audit_pass_permille: Option<u16>,
     /// The median of the node's recent speed tests, in bits per second, or
     /// `None` before its first one.
     pub bandwidth_bits_per_second: Option<u64>,
@@ -265,6 +271,7 @@ mod tests {
             nodes: vec![ListedNode {
                 record: Signed::sign(&key(1), record(&key(1))),
                 uptime_permille: 990,
+                audit_pass_permille: None,
                 bandwidth_bits_per_second: None,
                 used_bytes: None,
                 takes_allowance: false,

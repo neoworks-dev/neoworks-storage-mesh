@@ -162,8 +162,8 @@ impl TokenIssuer {
         Ok(signatures)
     }
 
-    /// A paid token of `month` for the coordinator's own use: paying a node
-    /// to keep a piece the coordinator rebuilt.
+    /// A paid token of `month` for the coordinator's own use: paying nodes to
+    /// keep its audit pieces and the pieces it rebuilt.
     ///
     /// It goes through blinding like any account's token, so it looks the
     /// same to the node; no balance pays for it, since the coordinator is

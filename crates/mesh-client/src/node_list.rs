@@ -22,7 +22,7 @@
 use std::path::Path;
 
 use mesh_core::NodeId;
-use mesh_core::node_list::{CoordinatorList, NodeSnapshot, TrustError};
+use mesh_core::node_list::{CoordinatorList, ListedNode, NodeSnapshot, TrustError};
 use mesh_core::protocol::NODE_LIST_ROUTE;
 use mesh_core::signed::Signed;
 use serde::Deserialize;
@@ -52,8 +52,8 @@ pub struct NodeInfo {
     #[serde(default)]
     pub region: Option<String>,
     /// How much more often than others the node is chosen. From a
-    /// coordinator it is the node's measured uptime; in a file it is set by
-    /// hand.
+    /// coordinator it is the node's measured uptime times the share of audits
+    /// it passed; in a file it is set by hand.
     #[serde(default = "default_weight")]
     pub weight: f64,
 }
@@ -212,7 +212,7 @@ impl NodeList {
                     operator: listed.operator_id.clone().unwrap_or_else(on_its_own),
                     network: listed.measured_network.clone().unwrap_or_else(on_its_own),
                     region: listed.measured_country.clone(),
-                    weight: f64::from(listed.uptime_permille) / 1000.0,
+                    weight: weight_of(listed),
                 }
             })
             .collect();
@@ -292,6 +292,17 @@ fn write_kept(path: &Path, snapshot: &Signed<NodeSnapshot>) -> std::io::Result<(
     std::fs::rename(&temporary_path, path)
 }
 
+/// How often `listed` is chosen: its uptime times the share of the
+/// coordinator's audits it passed. A node the coordinator has not audited
+/// yet is weighted by uptime alone, so new nodes still get pieces.
+fn weight_of(listed: &ListedNode) -> f64 {
+    let uptime = f64::from(listed.uptime_permille) / 1000.0;
+    let audits = listed
+        .audit_pass_permille
+        .map_or(1.0, |permille| f64::from(permille) / 1000.0);
+    uptime * audits
+}
+
 #[cfg(test)]
 mod tests {
     use mesh_core::node_list::{CoordinatorKey, ListedNode, NodeRecord};
@@ -316,6 +327,7 @@ mod tests {
         ListedNode {
             record: Signed::sign(signer, body),
             uptime_permille,
+            audit_pass_permille: None,
             bandwidth_bits_per_second: None,
             used_bytes: None,
             takes_allowance: false,
@@ -328,6 +340,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_becomes_a_list_weighted_by_uptime() {
+        // Not audited yet, so uptime alone sets the weight.
         let coordinator = key(10);
         let coordinators = CoordinatorList {
             version: 1,
@@ -352,6 +365,15 @@ mod tests {
             NodeId::of(&key(1).verifying_key().to_bytes())
         );
         assert_eq!(list.nodes[0].weight, 0.9);
+    }
+
+    #[test]
+    fn failed_audits_weigh_a_node_down() {
+        let mut audited = listed(&key(1), &key(1), 1000);
+        audited.audit_pass_permille = Some(500);
+
+        assert_eq!(weight_of(&audited), 0.5);
+        assert_eq!(weight_of(&listed(&key(2), &key(2), 800)), 0.8);
     }
 
     #[test]

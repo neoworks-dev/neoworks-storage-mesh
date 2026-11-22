@@ -171,6 +171,18 @@ fn root_hash(segment_count: u32, top: &MerkleHash) -> MerkleHash {
     MerkleHash(*hasher.finalize().as_bytes())
 }
 
+impl MerkleHash {
+    /// The hash with these 32 bytes.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        MerkleHash(bytes)
+    }
+
+    /// The 32 hash bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl fmt::Display for MerkleHash {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&hex::encode(self.0))

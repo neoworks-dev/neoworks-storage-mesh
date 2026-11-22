@@ -35,10 +35,11 @@ and delete it once the lease ends unless it is renewed, which is also how a
 file is deleted. An audit checks that the nodes still hold every piece, from
 a few random segments with Merkle proofs, and repair rebuilds lost pieces
 onto other nodes. Each node has a key of its own and registers with a
-coordinator, which checks that nodes are up, measures how fast they are and
-publishes a signed list of them. Clients register their chunks there by
-piece ids, without keys, and the coordinator rebuilds the pieces of nodes
-that go down while the owner's devices are off.
+coordinator, which checks that nodes are up, audits them with small pieces
+of its own, measures how fast they are and publishes a signed list of them.
+Clients register their chunks there by piece ids, without keys, and the
+coordinator rebuilds the pieces of nodes that go down while the owner's
+devices are off.
 
 Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
 nodes and coordinators can't tell whose they are. Nodes never set prices:
@@ -46,7 +47,8 @@ coordinators put each node in a class by its uptime and speed and move each
 class's price once a day by how full it is. Every account gets a free
 allowance each month, which only the coordinator's own nodes take, and buys
 more. A node's operator earns what users pay the node, over the month and
-only while the node stays up, and can spend it on storage of their own.
+only while the node stays up and passes the coordinator's audits, and can
+spend it on storage of their own.
 Tokens can never be turned back into money. The issues track what comes
 next.
 
