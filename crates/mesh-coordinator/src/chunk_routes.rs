@@ -8,7 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use mesh_core::chunk_registry::{
     CHUNK_ROUTE, CHUNKS_ROUTE, ChunkLocations, ChunkRegistration, MAX_CHUNKS_PER_REQUEST,
-    RegisterChunks, RegisterChunksResponse, chunk_id, responsible_coordinator,
+    RegisterChunks, RegisterChunksResponse, chunk_id, chunk_keepers,
 };
 
 use crate::chunk_book::Booked;
@@ -44,15 +44,18 @@ async fn register(
     Json(RegisterChunksResponse { accepted }).into_response()
 }
 
-/// Whether this coordinator repairs the chunk `registration` names. Two
-/// coordinators never keep the same chunk, so they never repair it twice.
+/// Whether this coordinator is one of the two keepers of the chunk
+/// `registration` names. Other coordinators' chunks are refused, so each
+/// chunk is kept, and repaired, by its two keepers only.
 fn is_responsible(coordinator: &Coordinator, registration: &ChunkRegistration) -> bool {
     let Some(coordinators) = &coordinator.chunk_owners else {
         return true;
     };
     let id = chunk_id(registration.pieces.iter().map(|piece| &piece.id));
     let own_key = coordinator.key.verifying_key().to_bytes();
-    responsible_coordinator(&id, coordinators).is_some_and(|owner| owner.key.0 == own_key)
+    chunk_keepers(&id, coordinators)
+        .iter()
+        .any(|keeper| keeper.key.0 == own_key)
 }
 
 /// `GET /chunks/{id}`: where the chunk's pieces are now.

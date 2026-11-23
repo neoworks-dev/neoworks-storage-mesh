@@ -39,7 +39,8 @@ coordinator, which checks that nodes are up, audits them with small pieces
 of its own, measures how fast they are and publishes a signed list of them.
 Clients register their chunks there by piece ids, without keys, and the
 coordinator rebuilds the pieces of nodes that go down while the owner's
-devices are off.
+devices are off. With several coordinators, each chunk is registered with
+two of them, and the second repairs it while the first is offline.
 
 Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
 nodes and coordinators can't tell whose they are. Nodes never set prices:
