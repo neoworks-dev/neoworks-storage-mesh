@@ -26,9 +26,11 @@ use mesh_core::protocol::{
 use mesh_core::signed::SigningKey;
 use mesh_core::tabs::StoreQuery;
 use mesh_core::{NodeId, PieceId, merkle};
+use tokio::sync::Mutex;
 
 use crate::clock::unix_now;
 use crate::mailbox_routes;
+use crate::mailbox_senders::ContactSenders;
 use crate::mailbox_store::MailboxStore;
 use crate::own_price::OwnPrice;
 use crate::piece_store::{PieceStore, StoreError};
@@ -48,6 +50,8 @@ pub(crate) struct Node {
     pub(crate) mailboxes: Arc<MailboxStore>,
     /// The bytes all mailbox messages together may take.
     pub(crate) mailbox_bytes: u64,
+    /// Messages each sending address left in each contact mailbox this week.
+    pub(crate) contact_senders: Arc<Mutex<ContactSenders>>,
     pub(crate) identity: Arc<NodeIdentity>,
     pub(crate) max_lease_seconds: u64,
     /// The coordinator tokens are spent at, when the node requires them.
@@ -96,6 +100,7 @@ pub fn router(
         tabs,
         mailboxes,
         mailbox_bytes: settings.mailbox_bytes,
+        contact_senders: Arc::new(Mutex::new(ContactSenders::default())),
         identity: Arc::new(identity),
         max_lease_seconds: settings.max_lease.as_secs(),
         token_coordinator: settings.require_tokens.clone(),
