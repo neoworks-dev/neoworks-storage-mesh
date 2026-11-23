@@ -17,6 +17,7 @@ mesh-node = { path = "crates/mesh-node" }
 anyhow = "1"
 argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 axum = "0.8"
+base64 = "0.22"
 blake3 = "1"
 blind-rsa-signatures = "0.19"
 chacha20poly1305 = "0.11"
@@ -26,6 +27,8 @@ fastcdc = { version = "5", features = ["tokio"] }
 futures = "0.3"
 getrandom = "0.4"
 hex = { version = "0.4", features = ["serde"] }
+hmac = "0.12"
+md-5 = "0.10"
 reed-solomon-simd = "3"
 # Rustls with its default aws-lc-rs provider, so binaries carry no system TLS
 # library. The ring provider would build without a C compiler, but needs a
@@ -38,6 +41,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 rusqlite = { version = "0.43", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

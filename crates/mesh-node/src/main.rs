@@ -11,6 +11,14 @@
 //!     --coordinator http://127.0.0.1:7000 --public-url http://203.0.113.7:7001 \
 //!     --operator alice --network AS3320 --region de --capacity-gb 500
 //! ```
+//!
+//! Pieces can live in an S3-compatible bucket instead of the data directory,
+//! which still holds the node's key and its leases:
+//!
+//! ```sh
+//! MESH_BUCKET_ACCESS_KEY=… MESH_BUCKET_SECRET_KEY=… mesh-node --data ./data/node-1 \
+//!     --bucket-endpoint https://fsn1.your-objectstorage.com --bucket node-1 --bucket-region fsn1
+//! ```
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -18,14 +26,14 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::{Args, Parser};
-use mesh_node::{NodeData, NodeSettings, Registration};
+use mesh_node::{Bucket, BucketSettings, NodeData, NodeSettings, Registration};
 use tokio::net::TcpListener;
 
 /// How often the node registers again, so a coordinator that lost its
 /// registry or missed a move catches up within the hour.
 const REGISTRATION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
-/// Runs a storage node that keeps pieces in a directory.
+/// Runs a storage node that keeps pieces in a directory or a bucket.
 #[derive(Parser)]
 struct Arguments {
     /// Address to listen on.
@@ -43,7 +51,48 @@ struct Arguments {
     #[arg(long)]
     require_tokens: Option<String>,
     #[command(flatten)]
+    bucket: BucketArguments,
+    #[command(flatten)]
     registration: RegistrationArguments,
+}
+
+/// An S3-compatible bucket to keep pieces in instead of the data directory;
+/// all or nothing. The keys come from the environment, so they never show
+/// up in the process list: `MESH_BUCKET_ACCESS_KEY` and
+/// `MESH_BUCKET_SECRET_KEY`.
+#[derive(Args)]
+#[group(requires_all = ["bucket_endpoint", "bucket", "bucket_region"], multiple = true)]
+struct BucketArguments {
+    /// The object store's address, such as
+    /// `https://fsn1.your-objectstorage.com`.
+    #[arg(long)]
+    bucket_endpoint: Option<String>,
+    /// The bucket's name. Give each node a bucket of its own.
+    #[arg(long)]
+    bucket: Option<String>,
+    /// The region requests are signed for, such as `fsn1`.
+    #[arg(long)]
+    bucket_region: Option<String>,
+}
+
+impl BucketArguments {
+    /// The bucket's settings, when the arguments name one.
+    fn settings(self) -> anyhow::Result<Option<BucketSettings>> {
+        let (Some(endpoint), Some(bucket), Some(region)) =
+            (self.bucket_endpoint, self.bucket, self.bucket_region)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(BucketSettings {
+            endpoint,
+            bucket,
+            region,
+            access_key: std::env::var("MESH_BUCKET_ACCESS_KEY")
+                .context("reading MESH_BUCKET_ACCESS_KEY")?,
+            secret_key: std::env::var("MESH_BUCKET_SECRET_KEY")
+                .context("reading MESH_BUCKET_SECRET_KEY")?,
+        }))
+    }
 }
 
 /// Where and as what to register; all or nothing, except the operator's
@@ -98,9 +147,14 @@ async fn main() -> anyhow::Result<()> {
         require_tokens: arguments.require_tokens.clone(),
         ..NodeSettings::default()
     };
-    let data = NodeData::open(&arguments.data)
-        .await
-        .with_context(|| format!("opening {}", arguments.data.display()))?;
+    let data = match arguments.bucket.settings()? {
+        Some(settings) => {
+            let bucket = Bucket::new(settings)?;
+            NodeData::open_with_bucket(&arguments.data, bucket).await
+        }
+        None => NodeData::open(&arguments.data).await,
+    };
+    let data = data.with_context(|| format!("opening {}", arguments.data.display()))?;
     let listener = TcpListener::bind(arguments.listen)
         .await
         .with_context(|| format!("listening on {}", arguments.listen))?;

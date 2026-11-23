@@ -177,6 +177,14 @@ impl ChunkBook {
         Ok(())
     }
 
+    /// Forgets the chunk `id`.
+    pub async fn forget(&self, id: &[u8; 32]) -> rusqlite::Result<()> {
+        let connection = self.connection.lock().await;
+        connection.execute("DELETE FROM chunk_piece WHERE chunk_id = ?1", params![id])?;
+        connection.execute("DELETE FROM chunk WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     /// Forgets the chunks that ended at or before `now`.
     pub async fn forget_ended(&self, now: u64) -> rusqlite::Result<()> {
         let connection = self.connection.lock().await;
@@ -284,5 +292,21 @@ mod tests {
         assert_eq!(book.pieces(&id).await.unwrap().unwrap()[1], moved);
         book.forget_ended(100).await.unwrap();
         assert_eq!(book.pieces(&id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_chunk_is_gone_and_others_stay() {
+        let (_directory, book) = book();
+        let forgotten = registration(1, 100);
+        let mut kept = registration(1, 100);
+        kept.pieces.reverse();
+        book.register(&forgotten).await.unwrap();
+        book.register(&kept).await.unwrap();
+        let id = chunk_id(forgotten.pieces.iter().map(|piece| &piece.id));
+
+        book.forget(&id).await.unwrap();
+
+        assert_eq!(book.pieces(&id).await.unwrap(), None);
+        assert_eq!(book.live_chunks(0).await.unwrap().len(), 1);
     }
 }

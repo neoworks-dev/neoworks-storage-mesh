@@ -60,6 +60,7 @@ mod token_routes;
 pub use coordinator_key::CoordinatorKeyError;
 pub use settings::CoordinatorSettings;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -214,6 +215,7 @@ pub async fn serve(
     let latest = Arc::new(RwLock::new(None));
     let prices = Arc::new(RwLock::new(None));
     let chunks = Arc::new(data.chunks);
+    let chunk_owners = settings.coordinators.clone().map(Arc::new);
     let repairer = Repairer {
         client: NodeClient::new().map_err(std::io::Error::other)?,
         registry: registry.clone(),
@@ -223,13 +225,15 @@ pub async fn serve(
         latest: latest.clone(),
         prices: prices.clone(),
         own_key: CoordinatorKey(data.key.verifying_key().to_bytes()),
+        coordinators: chunk_owners.clone(),
+        unreachable_since: Mutex::new(HashMap::new()),
     };
     let coordinator = Coordinator {
         registry: registry.clone(),
         earnings: earnings.clone(),
         accounts: Arc::new(data.accounts),
         chunks,
-        chunk_owners: settings.coordinators.clone().map(Arc::new),
+        chunk_owners,
         failed_sign_ins: Arc::new(Mutex::new(FailedSignIns::new())),
         mailbox_keys: Arc::new(data.mailbox_keys),
         tokens: tokens.clone(),
