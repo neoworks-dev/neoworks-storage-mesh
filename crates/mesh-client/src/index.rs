@@ -37,6 +37,7 @@ pub use crate::collection::unix_now;
 
 use crate::account::Account;
 use crate::batch_renew::{BatchRenewal, renew_pieces};
+use crate::change_notices::{ChangeNotice, send_notice};
 use crate::chunk_registration::{
     RegisterError, registration_of, send_registrations, take_new_locations,
 };
@@ -505,14 +506,32 @@ impl Index {
         self.save(session, changes).await
     }
 
-    /// Commits `changes` on top of this device's head and moves the
-    /// account's pointer to it.
+    /// Commits `changes` on top of this device's head, moves the account's
+    /// pointer to it, and tells the account's other devices.
     pub async fn save(
         &mut self,
         session: &Session<'_>,
         changes: Vec<Change>,
     ) -> Result<(), IndexError> {
-        Ok(self.collection.save(&session.writer(), changes).await?)
+        self.collection.save(&session.writer(), changes).await?;
+        let notice = ChangeNotice {
+            head_owner: session.account.pointer_owner(),
+            version: self.collection.version(),
+        };
+        // The save is done either way; without the notice, other devices
+        // only see it when they next read the pointer.
+        if let Err(error) = send_notice(
+            session.client,
+            session.list,
+            session.account,
+            notice,
+            unix_now(),
+        )
+        .await
+        {
+            eprintln!("telling other devices about the save: {error}");
+        }
+        Ok(())
     }
 
     fn entries(&self) -> Result<Entries, IndexError> {

@@ -147,6 +147,11 @@ pub struct Collection {
 }
 
 impl Collection {
+    /// The newest pointer version this device has seen or written.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Every entry as of this device's head.
     pub fn entries(&self) -> Result<Entries, CollectionError> {
         match &self.head {
