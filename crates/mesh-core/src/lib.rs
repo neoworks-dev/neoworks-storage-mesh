@@ -10,6 +10,7 @@
 mod canonical_hex;
 pub mod chunk_registry;
 pub mod earnings;
+pub mod gateway;
 pub mod layout;
 pub mod mailbox;
 pub mod merkle;

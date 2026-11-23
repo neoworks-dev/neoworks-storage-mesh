@@ -40,7 +40,10 @@ of its own, measures how fast they are and publishes a signed list of them.
 Clients register their chunks there by piece ids, without keys, and the
 coordinator rebuilds the pieces of nodes that go down while the owner's
 devices are off. With several coordinators, each chunk is registered with
-two of them, and the second repairs it while the first is offline.
+two of them, and the second repairs it while the first is offline. Every
+coordinator also runs a gateway under `/gateway` that forwards pieces and
+pointers between web pages and listed nodes, since pages served over HTTPS
+can't call nodes that speak plain HTTP.
 
 Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
 nodes and coordinators can't tell whose they are. Nodes never set prices:
