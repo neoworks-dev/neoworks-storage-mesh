@@ -11,13 +11,16 @@
 //! key ([`register`]). The `mesh-node` binary runs one; tests start nodes
 //! in-process through [`serve`].
 
+mod bucket;
 mod clock;
 mod lease_table;
 mod mailbox_routes;
+mod mailbox_senders;
 mod mailbox_store;
 mod node_data;
 mod node_key;
 mod own_price;
+mod piece_directory;
 mod piece_store;
 mod pointer_store;
 mod registration;
@@ -29,16 +32,18 @@ pub mod tab_book;
 mod tab_routes;
 mod usage;
 
+pub use bucket::{Bucket, BucketError, BucketSettings};
 pub use mailbox_store::{Appended, MailboxStore};
 pub use node_data::{NodeData, OpenError};
 pub use node_key::NodeKeyError;
-pub use piece_store::{PieceStore, StoreError};
+pub use piece_store::{ChallengeAnswer, PieceStore, StoreError};
 pub use pointer_store::{PointerPut, PointerStore, PointerStoreError};
 pub use registration::{Registration, RegistrationError, register, register_forever};
 pub use routes::router;
 pub use settings::NodeSettings;
 pub use tab_book::TabBook;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -62,7 +67,11 @@ pub async fn serve(
         data.key,
         &settings,
     );
-    let server = axum::serve(listener, app);
+    // Contact mailboxes count messages by the address that sent them.
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    );
     let stores = sweep::Swept {
         pieces,
         pointers,

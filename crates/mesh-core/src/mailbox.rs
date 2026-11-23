@@ -14,9 +14,17 @@
 //! [`WORK_BITS`] zero bits. Finding it takes about a second on a phone; the
 //! node checks it with one hash. Contacts write to a mailbox of their own at
 //! the hash of a secret only the two share ([`contact_address`]), which
-//! strangers can't compute, and need no work. The two kinds of mailbox live
-//! under different routes, so a stranger writing without work to someone's
-//! personal address reaches a box nobody reads.
+//! strangers can't compute. The two kinds of mailbox live under different
+//! routes, so a stranger writing to someone's personal address under the
+//! contact route reaches a box nobody reads.
+//!
+//! A node can't tell a real contact address from a made-up one, though, so
+//! anyone could fill its mailbox space with junk at random contact
+//! addresses. A contact message therefore carries a far smaller proof of
+//! work, [`CONTACT_WORK_BITS`], a few milliseconds for one message. A node
+//! also takes at most [`MAX_MESSAGES_PER_SENDER`] messages a week into one
+//! contact mailbox from each sending address, counting an IPv6 /64 as one
+//! address.
 //!
 //! People find each other's mailbox key by email at a coordinator, which
 //! signs what it answers ([`MailboxKey`]).
@@ -25,8 +33,9 @@
 //!
 //! - `PUT /mailboxes/{address}?week=W&nonce=N` with the message as the body
 //!   appends it, when the work holds and `W` is this week or last.
-//! - `PUT /contact-mailboxes/{address}` with the message as the body appends
-//!   it.
+//! - `PUT /contact-mailboxes/{address}?week=W&nonce=N` the same, with the
+//!   contact work, and `429 Too Many Requests` once the sending address has
+//!   left its share of messages there this week.
 //! - `GET /mailboxes/{address}` and `GET /contact-mailboxes/{address}`
 //!   return the messages as [`MailboxContents`].
 //!
@@ -65,6 +74,17 @@ pub const MESSAGE_LEASE_SECONDS: u64 = 2 * WEEK_SECONDS;
 /// pays it for every message.
 pub const WORK_BITS: u32 = 20;
 
+/// The zero bits a message to a contact mailbox has to buy: about 4,000
+/// hashes, a few milliseconds on a phone. Filling a node's 1 GiB of mailbox
+/// space with 1 KiB messages then takes about four billion hashes, again for
+/// every node and every two weeks.
+pub const CONTACT_WORK_BITS: u32 = 12;
+
+/// The most messages a node takes into one contact mailbox from one sending
+/// address in a week. A real contact sends a few; a flooder gets this many
+/// per mailbox for each address it controls.
+pub const MAX_MESSAGES_PER_SENDER: u32 = 16;
+
 /// The longest message. A share is a key and a pointer address, far below
 /// this; the limit keeps a mailbox from holding files.
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
@@ -89,6 +109,14 @@ impl MailboxKind {
         match self {
             MailboxKind::Personal => format!("/mailboxes/{address}"),
             MailboxKind::Contact => format!("/contact-mailboxes/{address}"),
+        }
+    }
+
+    /// The zero bits a message to a mailbox of this kind has to buy.
+    pub fn work_bits(self) -> u32 {
+        match self {
+            MailboxKind::Personal => WORK_BITS,
+            MailboxKind::Contact => CONTACT_WORK_BITS,
         }
     }
 }
@@ -117,22 +145,31 @@ pub fn contact_address(shared_secret: &[u8; 32], recipient: &[u8; 32], week: u64
     *hasher.finalize().as_bytes()
 }
 
-/// Whether `nonce` is enough work for `message` to `address` in `week`.
-pub fn work_holds(address: &[u8; 32], message: &[u8], week: u64, nonce: u64) -> bool {
+/// Whether `nonce` is enough work for `message` to the mailbox of `kind` at
+/// `address` in `week`.
+pub fn work_holds(
+    kind: MailboxKind,
+    address: &[u8; 32],
+    message: &[u8],
+    week: u64,
+    nonce: u64,
+) -> bool {
     let message_hash = blake3::hash(message);
-    leading_zero_bits(&work_hash(address, message_hash.as_bytes(), week, nonce)) >= WORK_BITS
+    let hash = work_hash(address, message_hash.as_bytes(), week, nonce);
+    leading_zero_bits(&hash) >= kind.work_bits()
 }
 
-/// The first nonce that is enough work for `message` to `address` in `week`.
-/// Takes about 2^[`WORK_BITS`] hashes.
-pub fn find_work(address: &[u8; 32], message: &[u8], week: u64) -> u64 {
+/// The first nonce that is enough work for `message` to the mailbox of
+/// `kind` at `address` in `week`. Takes about 2^[`MailboxKind::work_bits`]
+/// hashes.
+pub fn find_work(kind: MailboxKind, address: &[u8; 32], message: &[u8], week: u64) -> u64 {
     let message_hash = blake3::hash(message);
     // A nonce is found within a few million tries with all but vanishing
     // odds, far below u64::MAX.
     (0..u64::MAX)
         .find(|&nonce| {
             let hash = work_hash(address, message_hash.as_bytes(), week, nonce);
-            leading_zero_bits(&hash) >= WORK_BITS
+            leading_zero_bits(&hash) >= kind.work_bits()
         })
         .unwrap_or(u64::MAX)
 }
@@ -157,7 +194,8 @@ fn leading_zero_bits(hash: &[u8; 32]) -> u32 {
     bits
 }
 
-/// The query of a message to a personal mailbox.
+/// The query of a message to a mailbox of either kind: the week its work
+/// covers and the nonce.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkQuery {
     pub week: u64,
@@ -223,13 +261,42 @@ mod tests {
 
     #[test]
     fn found_work_holds_only_for_its_message_address_and_week() {
+        let personal = MailboxKind::Personal;
         let address = personal_address(&[7; 32], 3);
-        let nonce = find_work(&address, b"a share", 3);
+        let nonce = find_work(personal, &address, b"a share", 3);
 
-        assert!(work_holds(&address, b"a share", 3, nonce));
-        assert!(!work_holds(&address, b"another share", 3, nonce));
-        assert!(!work_holds(&address, b"a share", 4, nonce));
-        assert!(!work_holds(&[0; 32], b"a share", 3, nonce));
+        assert!(work_holds(personal, &address, b"a share", 3, nonce));
+        assert!(!work_holds(personal, &address, b"another share", 3, nonce));
+        assert!(!work_holds(personal, &address, b"a share", 4, nonce));
+        assert!(!work_holds(personal, &[0; 32], b"a share", 3, nonce));
+    }
+
+    #[test]
+    fn contact_work_is_not_enough_for_a_personal_mailbox() {
+        let address = contact_address(&[7; 32], &[1; 32], 3);
+        // The first nonce with 12 zero bits but fewer than 20: about one in
+        // 256 nonces that hold for contacts holds for personal mailboxes too.
+        let nonce = (0..u64::MAX)
+            .find(|&nonce| {
+                work_holds(MailboxKind::Contact, &address, b"a note", 3, nonce)
+                    && !work_holds(MailboxKind::Personal, &address, b"a note", 3, nonce)
+            })
+            .unwrap();
+
+        assert!(work_holds(
+            MailboxKind::Contact,
+            &address,
+            b"a note",
+            3,
+            nonce
+        ));
+        assert!(!work_holds(
+            MailboxKind::Personal,
+            &address,
+            b"a note",
+            3,
+            nonce
+        ));
     }
 
     #[test]
