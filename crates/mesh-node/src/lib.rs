@@ -11,6 +11,7 @@
 //! key ([`register`]). The `mesh-node` binary runs one; tests start nodes
 //! in-process through [`serve`].
 
+mod bucket;
 mod clock;
 mod lease_table;
 mod mailbox_routes;
@@ -18,6 +19,7 @@ mod mailbox_store;
 mod node_data;
 mod node_key;
 mod own_price;
+mod piece_directory;
 mod piece_store;
 mod pointer_store;
 mod registration;
@@ -29,6 +31,7 @@ pub mod tab_book;
 mod tab_routes;
 mod usage;
 
+pub use bucket::{Bucket, BucketError, BucketSettings};
 pub use mailbox_store::{Appended, MailboxStore};
 pub use node_data::{NodeData, OpenError};
 pub use node_key::NodeKeyError;
