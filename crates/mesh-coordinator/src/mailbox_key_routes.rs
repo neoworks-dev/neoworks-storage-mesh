@@ -1,7 +1,9 @@
 //! Filing and looking up mailbox keys over HTTP; `mesh_core::mailbox`
 //! describes the requests and [`crate::mailbox_keys`] what is kept.
 
-use axum::extract::{Query, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::put;
@@ -11,6 +13,7 @@ use mesh_core::sign_in::normalize_email;
 use mesh_core::signed::Signed;
 
 use crate::routes::Coordinator;
+use crate::sign_in_routes::check_sign_in;
 
 /// The mailbox key routes.
 pub fn routes() -> Router<Coordinator> {
@@ -20,16 +23,20 @@ pub fn routes() -> Router<Coordinator> {
 /// `PUT /mailbox-keys`: files a signed-in account's mailbox key.
 async fn publish(
     State(coordinator): State<Coordinator>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
     Json(request): Json<PublishMailboxKey>,
 ) -> Response {
-    let signed_in = coordinator
-        .accounts
-        .sign_in(&request.email, &request.auth_key)
-        .await;
-    match signed_in {
-        Ok(Some(_)) => {}
-        Ok(None) => return (StatusCode::UNAUTHORIZED, "wrong email or password").into_response(),
-        Err(error) => return internal_error(error),
+    // The route answers whether an auth key is right, so its failures count
+    // toward the same lock as sign-ins; otherwise it would be a way around it.
+    let checked = check_sign_in(
+        &coordinator,
+        address.ip(),
+        &request.email,
+        &request.auth_key,
+    )
+    .await;
+    if let Err(refusal) = checked {
+        return refusal.into_response();
     }
     match coordinator
         .mailbox_keys

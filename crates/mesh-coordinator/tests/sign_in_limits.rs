@@ -2,6 +2,7 @@
 //! refuses for a while, the same way for emails with and without accounts.
 
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
+use mesh_core::mailbox::{MAILBOX_KEYS_ROUTE, PublishMailboxKey};
 use mesh_core::sign_in::{
     ACCOUNTS_ROUTE, KdfParams, SALT_BYTES, SIGN_IN_ROUTE, SignInRequest, SignUpRequest,
 };
@@ -95,6 +96,35 @@ async fn an_unknown_email_is_locked_just_like_a_known_one() {
     let unknown = answers_to_guessing("nobody@example.org", false).await;
 
     assert_eq!(unknown, known);
+}
+
+#[tokio::test]
+async fn guesses_through_the_mailbox_key_route_count_toward_the_same_lock() {
+    let (_data, coordinator) = start_coordinator().await;
+    sign_up(&coordinator, "ana@example.org").await;
+    let mut answers = Vec::new();
+    for _ in 0..6 {
+        let request = PublishMailboxKey {
+            email: "ana@example.org".into(),
+            auth_key: WRONG_KEY,
+            public_key: [4; 32],
+        };
+        let response = reqwest::Client::new()
+            .put(format!("{coordinator}{MAILBOX_KEYS_ROUTE}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(&request).unwrap())
+            .send()
+            .await
+            .unwrap();
+        answers.push(response.status());
+    }
+
+    let signed_in = sign_in(&coordinator, "ana@example.org", RIGHT_KEY).await;
+
+    let mut expected = vec![StatusCode::UNAUTHORIZED; 5];
+    expected.push(StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(answers, expected);
+    assert_eq!(signed_in.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]

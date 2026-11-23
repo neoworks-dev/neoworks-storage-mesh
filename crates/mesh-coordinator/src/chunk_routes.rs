@@ -52,7 +52,7 @@ fn is_responsible(coordinator: &Coordinator, registration: &ChunkRegistration) -
     };
     let id = chunk_id(registration.pieces.iter().map(|piece| &piece.id));
     let own_key = coordinator.key.verifying_key().to_bytes();
-    responsible_coordinator(&id, coordinators).is_some_and(|key| key.0 == own_key)
+    responsible_coordinator(&id, coordinators).is_some_and(|owner| owner.key.0 == own_key)
 }
 
 /// `GET /chunks/{id}`: where the chunk's pieces are now.
