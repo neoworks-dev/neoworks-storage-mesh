@@ -7,6 +7,14 @@
 //! otherwise once its first lost piece has been down for the repair delay,
 //! an hour by default, so a node that only reboots causes no repair.
 //!
+//! With several coordinators, each chunk has two keepers
+//! (`mesh_core::chunk_registry::chunk_keepers`). Before repairing a chunk
+//! that is due, a keeper asks the other where its pieces are and takes in
+//! what the other moved. The first keeper then repairs; the second only
+//! once the first has failed to answer for the repair delay, or says it
+//! doesn't keep the chunk, so a coordinator going offline leaves its chunks
+//! repaired by the other.
+//!
 //! Repair works on sealed bytes only: it fetches as many pieces as the chunk
 //! has data pieces, rebuilds the sealed chunk, cuts it again, and stores each
 //! lost piece on a new node within the chunk's placement limits. Cutting is
@@ -20,20 +28,22 @@
 //! value was paid for exactly the pieces the node held, so the owner pays
 //! nothing twice. Repair traffic itself is not charged.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mesh_client::chunk_registration::locations_at;
 use mesh_client::erasure::{cut, rebuild};
 use mesh_client::placement::{Spread, choose};
 use mesh_client::tabs::new_tab_name;
 use mesh_client::{NodeClient, NodeInfo, NodeList, NodeRequestError};
-use mesh_core::chunk_registry::RegisteredPiece;
-use mesh_core::node_list::{CoordinatorKey, CoordinatorList};
+use mesh_core::chunk_registry::{ChunkLocations, RegisteredPiece, chunk_keepers};
+use mesh_core::node_list::{CoordinatorKey, CoordinatorList, ListedCoordinator};
 use mesh_core::tabs::storage_cost;
 use mesh_core::tokens::{MICROTOKENS_PER_TOKEN, MONTH_SECONDS, month_of};
 use mesh_core::{NodeId, PieceId};
 use reqwest::StatusCode;
+use tokio::sync::Mutex;
 
 use crate::chunk_book::{BookedChunk, ChunkBook};
 use crate::clock::unix_now;
@@ -55,6 +65,12 @@ pub struct Repairer {
     pub prices: Arc<LatestPrices>,
     /// The coordinator's own key, which its snapshots are checked with.
     pub own_key: CoordinatorKey,
+    /// All coordinators, when there are several, which say who keeps each
+    /// chunk; `None` when this one keeps every chunk alone.
+    pub coordinators: Option<Arc<CoordinatorList>>,
+    /// Since when each other coordinator, by key, has failed to answer
+    /// about a chunk, until it answers again.
+    pub unreachable_since: Mutex<HashMap<[u8; 32], u64>>,
 }
 
 /// A piece of a chunk that is lost for now.
@@ -62,6 +78,33 @@ struct LostPiece {
     position: usize,
     /// When its node went down; 0 for a node gone from the list.
     since: u64,
+}
+
+/// Which of a chunk's keepers this coordinator is.
+enum Keeping<'list> {
+    /// Not a keeper, as after the coordinator list changed.
+    Not,
+    /// The only keeper.
+    Alone,
+    /// The first keeper, which repairs; `other` is the second.
+    First { other: &'list ListedCoordinator },
+    /// The second keeper, which repairs only while `other`, the first, is
+    /// unreachable.
+    Second { other: &'list ListedCoordinator },
+}
+
+/// What the other keeper of a chunk said about it.
+enum Heard {
+    /// It answered and had moved pieces this coordinator had lost, which
+    /// this coordinator took in.
+    Moved,
+    /// It answered with nothing new.
+    Answered,
+    /// It answered that it does not keep the chunk, as when the owner's
+    /// registration reached only this coordinator.
+    NotKept,
+    /// It did not answer, and has not since `since`.
+    Unreachable { since: u64 },
 }
 
 impl Repairer {
@@ -72,12 +115,121 @@ impl Repairer {
         };
         let known: HashSet<NodeId> = list.nodes.iter().map(|node| node.id).collect();
         for chunk in self.chunks.live_chunks(now).await? {
-            let lost = self.lost_pieces(&chunk, &known).await?;
-            if is_due(&chunk, &lost, now, settings.repair_delay) {
-                self.repair(&chunk, &lost, &list, now).await?;
-            }
+            self.look_over(&chunk, &list, &known, now, settings.repair_delay)
+                .await?;
         }
         self.chunks.forget_ended(now).await
+    }
+
+    /// Repairs `chunk` when it is due and this coordinator is the keeper to
+    /// do it, and forgets it when this coordinator no longer keeps it.
+    async fn look_over(
+        &self,
+        chunk: &BookedChunk,
+        list: &NodeList,
+        known: &HashSet<NodeId>,
+        now: u64,
+        delay: Duration,
+    ) -> rusqlite::Result<()> {
+        let keeping = self.keeping(&chunk.id);
+        // Clients register the chunk with its new keepers at their next
+        // renewal, so the old keeper lets it go.
+        if let Keeping::Not = keeping {
+            return self.chunks.forget(&chunk.id).await;
+        }
+        let lost = self.lost_pieces(chunk, known).await?;
+        if !is_due(chunk, &lost, now, delay) {
+            return Ok(());
+        }
+        let repairs_now = match keeping {
+            Keeping::Not | Keeping::Alone => true,
+            // The second may have repaired while this one was away; taking
+            // in its moves first keeps both from rebuilding the same piece.
+            Keeping::First { other } => !matches!(
+                self.hear_from(other, chunk, known, now).await?,
+                Heard::Moved
+            ),
+            Keeping::Second { other } => match self.hear_from(other, chunk, known, now).await? {
+                Heard::NotKept => true,
+                Heard::Unreachable { since } => now >= since + delay.as_secs(),
+                Heard::Moved | Heard::Answered => false,
+            },
+        };
+        if !repairs_now {
+            return Ok(());
+        }
+        self.repair(chunk, &lost, list, now).await
+    }
+
+    /// Which keeper of the chunk `id` this coordinator is.
+    fn keeping(&self, id: &[u8; 32]) -> Keeping<'_> {
+        let Some(coordinators) = &self.coordinators else {
+            return Keeping::Alone;
+        };
+        let keepers = chunk_keepers(id, coordinators);
+        let own_rank = keepers.iter().position(|keeper| keeper.key == self.own_key);
+        match own_rank {
+            None => Keeping::Not,
+            Some(0) => match keepers.get(1) {
+                Some(other) => Keeping::First { other },
+                None => Keeping::Alone,
+            },
+            Some(_) => Keeping::Second { other: keepers[0] },
+        }
+    }
+
+    /// Asks `other`, the chunk's other keeper, where the pieces of `chunk`
+    /// are, takes in the pieces it moved off nodes this coordinator counts
+    /// as lost, and notes whether it answered at `now`.
+    async fn hear_from(
+        &self,
+        other: &ListedCoordinator,
+        chunk: &BookedChunk,
+        known: &HashSet<NodeId>,
+        now: u64,
+    ) -> rusqlite::Result<Heard> {
+        let answer = locations_at(&self.client, &other.url, &chunk.id).await;
+        let Ok(locations) = answer else {
+            let mut unreachable = self.unreachable_since.lock().await;
+            let since = *unreachable.entry(other.key.0).or_insert(now);
+            return Ok(Heard::Unreachable { since });
+        };
+        self.unreachable_since.lock().await.remove(&other.key.0);
+        let Some(locations) = locations else {
+            return Ok(Heard::NotKept);
+        };
+        if self.take_moves(chunk, &locations, known).await? {
+            return Ok(Heard::Moved);
+        }
+        Ok(Heard::Answered)
+    }
+
+    /// Moves each piece of `chunk` that is on a lost node to where
+    /// `locations` has it, when that node is not lost, and whether any
+    /// moved.
+    async fn take_moves(
+        &self,
+        chunk: &BookedChunk,
+        locations: &ChunkLocations,
+        known: &HashSet<NodeId>,
+    ) -> rusqlite::Result<bool> {
+        let mut moved = false;
+        for (position, (ours, theirs)) in chunk.pieces.iter().zip(&locations.pieces).enumerate() {
+            if theirs.id != ours.id || theirs.node == ours.node {
+                continue;
+            }
+            // The other keeper's book can be older than this one; taking
+            // every location that differs would move pieces back onto the
+            // nodes repair took them off.
+            let ours_lost = self.lost_since(&ours.node, known).await?.is_some();
+            let theirs_lost = self.lost_since(&theirs.node, known).await?.is_some();
+            if !ours_lost || theirs_lost {
+                continue;
+            }
+            self.chunks.move_piece(&chunk.id, position, theirs).await?;
+            moved = true;
+        }
+        Ok(moved)
     }
 
     /// The nodes in the newest snapshot that are up right now, or `None`
@@ -86,9 +238,14 @@ impl Repairer {
         let Some(snapshot) = self.latest.read().await.clone() else {
             return Ok(None);
         };
+        // Checking the snapshot looks at keys only, so this list of just
+        // this coordinator needs no URL.
         let own = CoordinatorList {
             version: 0,
-            keys: vec![self.own_key],
+            coordinators: vec![ListedCoordinator {
+                key: self.own_key,
+                url: String::new(),
+            }],
         };
         // The coordinator signed it itself, so this only fails if the key
         // changed under it; then there is nothing to place on until the next
@@ -116,15 +273,25 @@ impl Repairer {
     ) -> rusqlite::Result<Vec<LostPiece>> {
         let mut lost = Vec::new();
         for (position, piece) in chunk.pieces.iter().enumerate() {
-            let down_since = self.registry.down_since(&piece.node).await?;
-            let since = match down_since {
-                Some(since) => since,
-                None if known.contains(&piece.node) => continue,
-                None => 0,
-            };
-            lost.push(LostPiece { position, since });
+            if let Some(since) = self.lost_since(&piece.node, known).await? {
+                lost.push(LostPiece { position, since });
+            }
         }
         Ok(lost)
+    }
+
+    /// Since when `node` is down, 0 when it is not among `known`, or `None`
+    /// while it is up.
+    async fn lost_since(
+        &self,
+        node: &NodeId,
+        known: &HashSet<NodeId>,
+    ) -> rusqlite::Result<Option<u64>> {
+        match self.registry.down_since(node).await? {
+            Some(since) => Ok(Some(since)),
+            None if known.contains(node) => Ok(None),
+            None => Ok(Some(0)),
+        }
     }
 
     /// Rebuilds the `lost` pieces of `chunk` and stores them on nodes from

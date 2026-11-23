@@ -14,10 +14,10 @@
 //! the nodes are now in the list. Instead of `--nodes`, every command takes
 //! `--coordinator http://… --coordinators coordinators.json` to fetch the
 //! signed node list, where `coordinators.json` holds the coordinator list
-//! whose keys it must be signed with:
+//! whose keys it must be signed with, and where each coordinator is reached:
 //!
 //! ```json
-//! { "version": 1, "keys": ["5c0f…"] }
+//! { "version": 1, "coordinators": [{ "key": "5c0f…", "url": "https://…" }] }
 //! ```
 //!
 //! The newest node list accepted from a coordinator is kept in
@@ -29,10 +29,13 @@
 //! on first use; until there are accounts, that file is what makes the same
 //! chunk encrypt the same way every time.
 //!
-//! With a coordinator, `put`, `renew` and `repair` register the file's chunks
-//! there, by piece ids and nodes and without keys, so the coordinator repairs
-//! them while this device is off. Every command that reads a manifest first
-//! takes in where the coordinator moved pieces since, and saves it.
+//! With a coordinator list, `put`, `renew` and `repair` register each of the
+//! file's chunks with the coordinator responsible for it, by piece ids and
+//! nodes and without keys, so the coordinators repair them while this device
+//! is off. Every command that reads a manifest first takes in where the
+//! coordinators moved pieces since, and saves it. `store`
+//! and `renew-all` do the same for the account's files and the index's own
+//! commits, and reading the index takes in the moves.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -46,6 +49,7 @@ use mesh_client::{
     AUDIT_DEADLINE, ChunkRepair, DedupKey, Manifest, NodeClient, NodeList, PieceHealth,
 };
 use mesh_core::node_list::CoordinatorList;
+use mesh_core::tokens::TokenKind;
 
 use crate::account_commands::AccountArguments;
 
@@ -127,8 +131,23 @@ enum Command {
         account: AccountArguments,
     },
     /// Renews everything the account keeps, one request per node; meant to
-    /// run from a timer, such as weekly.
+    /// run from a timer, such as weekly. With a coordinator, nodes that
+    /// require tokens are paid from the account's wallet.
     RenewAll {
+        #[command(flatten)]
+        account: AccountArguments,
+    },
+    /// Takes tokens for the account's wallet from the coordinator, signing in
+    /// with a password read from standard input.
+    TakeTokens {
+        email: String,
+        /// How many tokens to take.
+        #[arg(long)]
+        count: usize,
+        /// Take allowance tokens, which only the coordinator's own nodes
+        /// accept, instead of paid ones from the account's balance.
+        #[arg(long)]
+        allowance: bool,
         #[command(flatten)]
         account: AccountArguments,
     },
@@ -223,6 +242,19 @@ async fn main() -> anyhow::Result<()> {
         } => account_commands::store(&client, &file, name, &account).await,
         Command::Ls { account } => account_commands::list_files(&client, &account).await,
         Command::RenewAll { account } => account_commands::renew_all(&client, &account).await,
+        Command::TakeTokens {
+            email,
+            count,
+            allowance,
+            account,
+        } => {
+            let kind = if allowance {
+                TokenKind::Allowance
+            } else {
+                TokenKind::Paid
+            };
+            account_commands::take_tokens(&client, &email, count, kind, &account).await
+        }
         Command::Fetch {
             name,
             output,
@@ -240,15 +272,10 @@ async fn load_node_list(
     if let Some(path) = &source.nodes {
         return NodeList::read(path).with_context(|| format!("reading {}", path.display()));
     }
-    // clap requires either `--nodes` or both of these.
-    let (Some(coordinator), Some(coordinators_path)) = (&source.coordinator, &source.coordinators)
-    else {
+    // clap requires either `--nodes` or both coordinator options.
+    let Some((coordinator, coordinators)) = coordinator_of(arguments)? else {
         anyhow::bail!("give --nodes, or --coordinator with --coordinators");
     };
-    let json = std::fs::read(coordinators_path)
-        .with_context(|| format!("reading {}", coordinators_path.display()))?;
-    let coordinators: CoordinatorList = serde_json::from_slice(&json)
-        .with_context(|| format!("parsing {}", coordinators_path.display()))?;
     let kept_path = &arguments.kept_node_list;
     let fetched = NodeList::fetch_keeping_newest(client, coordinator, &coordinators, kept_path)
         .await
@@ -267,6 +294,20 @@ async fn load_node_list(
         ),
     }
     Ok(fetched.list)
+}
+
+/// The coordinator the arguments name and the coordinator list read from
+/// `--coordinators`, or `None` when they name a node list file instead.
+fn coordinator_of(
+    arguments: &NodeListArguments,
+) -> anyhow::Result<Option<(&str, CoordinatorList)>> {
+    let (Some(coordinator), Some(coordinators)) = (
+        &arguments.source.coordinator,
+        read_coordinator_list(arguments)?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some((coordinator, coordinators)))
 }
 
 async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()> {
@@ -293,41 +334,52 @@ async fn put(client: &NodeClient, arguments: &PutArguments) -> anyhow::Result<()
     register_for_repair(client, &arguments.nodes, &manifest, lease).await
 }
 
+/// The coordinator list in the file `--coordinators` names, if it names one.
+fn read_coordinator_list(arguments: &NodeListArguments) -> anyhow::Result<Option<CoordinatorList>> {
+    let Some(path) = &arguments.source.coordinators else {
+        return Ok(None);
+    };
+    let json = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let coordinators =
+        serde_json::from_slice(&json).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(Some(coordinators))
+}
+
 /// Registers `manifest` for repair until `lease` from now with the
-/// coordinator `nodes` names, if it names one.
+/// coordinators on the list `nodes` names, if it names one.
 async fn register_for_repair(
     client: &NodeClient,
     nodes: &NodeListArguments,
     manifest: &Manifest,
     lease: Duration,
 ) -> anyhow::Result<()> {
-    let Some(coordinator) = &nodes.source.coordinator else {
+    let Some(coordinators) = read_coordinator_list(nodes)? else {
         return Ok(());
     };
     let expires_at = unix_now() + lease.as_secs();
-    let kept = register(client, coordinator, manifest, expires_at)
+    let kept = register(client, &coordinators, manifest, expires_at)
         .await
         .context("registering the chunks for repair")?;
     println!(
-        "{coordinator} repairs {kept} of {} chunks",
+        "the coordinators repair {kept} of {} chunks",
         manifest.chunks.len()
     );
     Ok(())
 }
 
-/// The manifest in `path`, with the pieces that the coordinator `nodes`
-/// names, if it names one, moved in repair since; saved again when any
-/// moved.
+/// The manifest in `path`, with the pieces that the coordinators on the list
+/// `nodes` names, if it names one, moved in repair since; saved again when
+/// any moved.
 async fn read_current_manifest(
     client: &NodeClient,
     path: &Path,
     nodes: &NodeListArguments,
 ) -> anyhow::Result<Manifest> {
     let mut manifest = read_manifest(path)?;
-    let Some(coordinator) = &nodes.source.coordinator else {
+    let Some(coordinators) = read_coordinator_list(nodes)? else {
         return Ok(manifest);
     };
-    let moved = take_new_locations(client, coordinator, &mut manifest)
+    let moved = take_new_locations(client, &coordinators, &mut manifest)
         .await
         .context("asking where repair moved pieces")?;
     if moved > 0 {

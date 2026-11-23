@@ -237,9 +237,10 @@ async fn a_node_that_never_answers_is_passed_over_and_remembered() {
     assert_eq!(read, file);
     // The chunks fetched at once all ask the unmeasured node before any
     // learns it is silent. Once the first of them finishes, the node is
-    // recorded with the time it was waited on and ranks behind faster nodes,
-    // so later chunks mostly do not ask it. Under load a healthy node can be
-    // slower than that record, which is why this allows a few more.
+    // recorded as taking the whole request timeout and ranks last, so later
+    // chunks ask it only when hedging runs out of other nodes: each chunk
+    // has five healthy pieces for four needed, and under load large pieces
+    // can take longer than the hedge delay.
     let asked = asked.load(Ordering::SeqCst);
     assert!(
         asked < manifest.chunks.len(),

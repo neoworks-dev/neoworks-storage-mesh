@@ -106,6 +106,7 @@ async fn renewing_the_index_writes_the_bundle_again() {
         account: &account,
         device: "laptop".to_string(),
         lease: LEASE,
+        coordinators: None,
     };
     let stored = place("ana@example.org", "correct horse");
     store_bundle(&client, &list, &stored, &account, LEASE)
