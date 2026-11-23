@@ -16,10 +16,12 @@
 //! node never looks inside a piece; to it, every piece is noise of some
 //! length.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::Path;
 
 use mesh_core::PieceId;
+use mesh_core::merkle::{self, GROUP_SEGMENTS, MerkleHash, SEGMENT_BYTES, SegmentProof};
 use tokio::sync::Mutex;
 
 use crate::bucket::{Bucket, BucketError};
@@ -52,7 +54,29 @@ pub enum StoreError {
     Bucket(#[from] BucketError),
     #[error("lease table: {0}")]
     Leases(#[from] rusqlite::Error),
+    #[error("the bucket's copy of the piece is not as long as recorded")]
+    WrongLength,
 }
+
+/// What a store answers to a storage challenge.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChallengeAnswer {
+    /// The node does not hold the piece.
+    NotHeld,
+    /// The piece has no segment `index`; it has `segment_count` of them.
+    NoSegment { index: u32, segment_count: u32 },
+    /// One proof per segment asked for, in the order asked.
+    Proofs(Vec<SegmentProof>),
+}
+
+/// What the lease table recorded about a piece kept in a bucket.
+struct PieceShape {
+    len: u64,
+    group_hashes: Vec<MerkleHash>,
+}
+
+/// The bytes in one group of [`GROUP_SEGMENTS`] segments.
+const GROUP_BYTES: usize = GROUP_SEGMENTS * SEGMENT_BYTES;
 
 impl PieceStore {
     /// Opens the store in `directory`, keeping pieces as files there,
@@ -103,10 +127,17 @@ impl PieceStore {
         // between, the lease points at missing bytes, which read as "not
         // held" and which the sweep cleans up; the other order would leave
         // bytes no lease ever deletes.
+        let group_hashes = match &self.bytes {
+            PieceBytes::Bucket(_) => Some(merkle::group_hashes(bytes)),
+            PieceBytes::Directory(_) => None,
+        };
         let lease_end = {
             let leases = self.leases.lock().await;
             let lease_end = leases.extend(id, expires_at)?;
             leases.record_len(id, bytes.len() as u64)?;
+            if let Some(group_hashes) = &group_hashes {
+                leases.record_group_hashes(id, group_hashes)?;
+            }
             lease_end
         };
         // The bytes are written without the lock, so a slow upload to a
@@ -150,6 +181,52 @@ impl PieceStore {
             PieceBytes::Directory(directory) => Ok(directory.read(id).await?),
             PieceBytes::Bucket(bucket) => Ok(bucket.get(&id.to_string()).await?),
         }
+    }
+
+    /// Proves that the node holds segments `indices` of the piece `id` at
+    /// `now`, with one proof per index, in the order asked.
+    ///
+    /// A directory reads the whole piece, which a local disk does quickly. A
+    /// bucket reads only the 64 KiB group of each segment asked for, and
+    /// takes the rest of each proof from the group hashes recorded when the
+    /// piece was stored, so a challenge costs a few ranged reads rather than
+    /// a download of up to 9 MiB.
+    pub async fn prove(
+        &self,
+        id: &PieceId,
+        indices: &[u32],
+        now: u64,
+    ) -> Result<ChallengeAnswer, StoreError> {
+        if !self.is_held(id, now).await? {
+            return Ok(ChallengeAnswer::NotHeld);
+        }
+        let ranged = match &self.bytes {
+            PieceBytes::Bucket(bucket) => {
+                self.recorded_shape(id).await?.map(|shape| (bucket, shape))
+            }
+            PieceBytes::Directory(_) => None,
+        };
+        if let Some((bucket, shape)) = ranged {
+            return prove_from_groups(bucket, id, &shape, indices).await;
+        }
+        // Pieces in a bucket stored before group hashes were recorded are
+        // read whole, as pieces in a directory are.
+        let Some(piece) = self.get(id, now).await? else {
+            return Ok(ChallengeAnswer::NotHeld);
+        };
+        Ok(prove_from_piece(&piece, indices))
+    }
+
+    /// The recorded length and group hashes of `id`, when both are recorded.
+    async fn recorded_shape(&self, id: &PieceId) -> Result<Option<PieceShape>, StoreError> {
+        let leases = self.leases.lock().await;
+        let Some(len) = leases.len_of(id)? else {
+            return Ok(None);
+        };
+        let shape = leases
+            .group_hashes_of(id)?
+            .map(|group_hashes| PieceShape { len, group_hashes });
+        Ok(shape)
     }
 
     /// The length of the piece `id`, or `None` when the node does not hold it
@@ -237,6 +314,82 @@ impl PieceStore {
             PieceBytes::Bucket(bucket) => Ok(bucket.put(&id.to_string(), bytes).await?),
         }
     }
+}
+
+/// The answer to a challenge for `indices` of the whole `piece`.
+fn prove_from_piece(piece: &[u8], indices: &[u32]) -> ChallengeAnswer {
+    let mut proofs = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let Some(proof) = merkle::prove(piece, index) else {
+            let segment_count = merkle::segment_count(piece.len());
+            return ChallengeAnswer::NoSegment {
+                index,
+                segment_count,
+            };
+        };
+        proofs.push(proof);
+    }
+    ChallengeAnswer::Proofs(proofs)
+}
+
+/// The answer to a challenge for `indices` of the piece `id` of `shape` in
+/// `bucket`, reading only the groups the indices fall in.
+async fn prove_from_groups(
+    bucket: &Bucket,
+    id: &PieceId,
+    shape: &PieceShape,
+    indices: &[u32],
+) -> Result<ChallengeAnswer, StoreError> {
+    let segment_count = merkle::segment_count(shape.len as usize);
+    if let Some(&index) = indices.iter().find(|&&index| index >= segment_count) {
+        return Ok(ChallengeAnswer::NoSegment {
+            index,
+            segment_count,
+        });
+    }
+    let Some(groups) = read_groups(bucket, id, shape.len, indices).await? else {
+        return Ok(ChallengeAnswer::NotHeld);
+    };
+    let mut proofs = Vec::with_capacity(indices.len());
+    for &index in indices {
+        // `read_groups` read the group of every index, so this is there.
+        let group = &groups[&(index as usize / GROUP_SEGMENTS)];
+        // A group of another length than the recorded one means the bucket
+        // holds other bytes than were stored; no proof would lead to the
+        // root, so the node reports its own fault instead.
+        let proof = merkle::prove_in_group(&shape.group_hashes, segment_count, group, index)
+            .ok_or(StoreError::WrongLength)?;
+        proofs.push(proof);
+    }
+    Ok(ChallengeAnswer::Proofs(proofs))
+}
+
+/// The bytes of each group `indices` fall in, by group number, one ranged
+/// read each, from the object `id` of `len` bytes. `None` when the bucket
+/// has no such object.
+async fn read_groups(
+    bucket: &Bucket,
+    id: &PieceId,
+    len: u64,
+    indices: &[u32],
+) -> Result<Option<BTreeMap<usize, Vec<u8>>>, BucketError> {
+    let group_numbers: BTreeSet<usize> = indices
+        .iter()
+        .map(|&index| index as usize / GROUP_SEGMENTS)
+        .collect();
+    let key = id.to_string();
+    let mut groups = BTreeMap::new();
+    for group_number in group_numbers {
+        let start = (group_number * GROUP_BYTES) as u64;
+        // Asking exactly for the bytes there are, since a bucket refuses a
+        // range that starts at the end of an empty object.
+        let group_len = len.saturating_sub(start).min(GROUP_BYTES as u64);
+        let Some(bytes) = bucket.get_range(&key, start, group_len).await? else {
+            return Ok(None);
+        };
+        groups.insert(group_number, bytes);
+    }
+    Ok(Some(groups))
 }
 
 #[cfg(test)]
