@@ -14,9 +14,11 @@
 //! chunk's key, and later registrations of the chunk, such as after a
 //! renewal, must carry the same secret.
 //!
-//! Each chunk belongs to one coordinator ([`responsible_coordinator`]), so
-//! two coordinators never repair the same chunk. Clients send each chunk's
-//! registration to, and ask its locations at, that coordinator's URL on the
+//! Each chunk is kept by two coordinators ([`chunk_keepers`]), so it is
+//! still repaired while either is offline. The first repairs it; the second
+//! only once the first has been unreachable for the repair delay, so the two
+//! don't rebuild the same pieces twice. Clients send each chunk's
+//! registration to, and ask its locations at, both keepers' URLs on the
 //! coordinator list.
 //!
 //! - `POST /chunks` with a [`RegisterChunks`] registers or updates chunks
@@ -52,27 +54,41 @@ pub fn chunk_id<'a>(piece_ids: impl IntoIterator<Item = &'a PieceId>) -> [u8; 32
     *hasher.finalize().as_bytes()
 }
 
-/// The coordinator on `coordinators` that repairs the chunk `id`: the one
-/// whose key scores highest with it, or `None` for an empty list.
+/// How many coordinators keep each chunk's registration. Two, so a chunk
+/// is still repaired while any one coordinator is offline.
+pub const KEEPERS_PER_CHUNK: usize = 2;
+
+/// The coordinators on `coordinators` that keep the chunk `id`, the one that
+/// repairs it first: the [`KEEPERS_PER_CHUNK`] whose keys score highest with
+/// it, fewer on a shorter list. The second repairs only while the first is
+/// unreachable.
 ///
 /// Scoring every key against the chunk (rendezvous hashing) needs no table
 /// that coordinators would have to agree on. Every coordinator and client
-/// with the same list picks the same one, and when a coordinator joins or
+/// with the same list picks the same ones, and when a coordinator joins or
 /// leaves, only the chunks it wins or held move; the rest stay where they
 /// are.
 ///
 /// Only keys are scored, so a coordinator moving to another URL keeps its
-/// chunks.
-pub fn responsible_coordinator<'list>(
+/// chunks. A key listed twice counts once, so a chunk always has two
+/// different keepers when the list has two different keys.
+pub fn chunk_keepers<'list>(
     id: &[u8; 32],
     coordinators: &'list CoordinatorList,
-) -> Option<&'list ListedCoordinator> {
-    coordinators.coordinators.iter().max_by_key(|coordinator| {
-        let mut hasher = blake3::Hasher::new_derive_key("neoworks-mesh chunk owner v1");
-        hasher.update(id);
-        hasher.update(&coordinator.key.0);
-        *hasher.finalize().as_bytes()
-    })
+) -> Vec<&'list ListedCoordinator> {
+    let mut ranked: Vec<&ListedCoordinator> = coordinators.coordinators.iter().collect();
+    ranked.sort_by_key(|coordinator| std::cmp::Reverse(keeper_score(id, coordinator)));
+    ranked.dedup_by_key(|coordinator| coordinator.key);
+    ranked.truncate(KEEPERS_PER_CHUNK);
+    ranked
+}
+
+/// How high `coordinator` ranks for keeping the chunk `id`.
+fn keeper_score(id: &[u8; 32], coordinator: &ListedCoordinator) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("neoworks-mesh chunk owner v1");
+    hasher.update(id);
+    hasher.update(&coordinator.key.0);
+    *hasher.finalize().as_bytes()
 }
 
 /// One piece of a registered chunk and the node holding it.
@@ -109,8 +125,8 @@ pub struct RegisterChunks {
 }
 
 /// For each chunk asked, whether the coordinator now keeps it: `false` for
-/// a chunk registered with another secret, one another coordinator is
-/// responsible for, or one whose pieces don't fit its layout.
+/// a chunk registered with another secret, one this coordinator is not a
+/// keeper of, or one whose pieces don't fit its layout.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterChunksResponse {
     pub accepted: Vec<bool>,
@@ -139,9 +155,17 @@ mod tests {
         }
     }
 
-    /// The key of the coordinator responsible for `id` on `list`.
+    /// The keys of the keepers of `id` on `list`, the first first.
+    fn keepers(id: &[u8; 32], list: &CoordinatorList) -> Vec<CoordinatorKey> {
+        chunk_keepers(id, list)
+            .into_iter()
+            .map(|coordinator| coordinator.key)
+            .collect()
+    }
+
+    /// The key of the first keeper of `id` on `list`.
     fn owner(id: &[u8; 32], list: &CoordinatorList) -> Option<CoordinatorKey> {
-        responsible_coordinator(id, list).map(|coordinator| coordinator.key)
+        keepers(id, list).first().copied()
     }
 
     fn ids() -> Vec<[u8; 32]> {
@@ -187,7 +211,36 @@ mod tests {
         after.coordinators[0].url = "https://elsewhere.example.org".into();
 
         for id in ids() {
-            assert_eq!(owner(&id, &before), owner(&id, &after));
+            assert_eq!(keepers(&id, &before), keepers(&id, &after));
+        }
+    }
+
+    #[test]
+    fn a_chunk_has_two_different_keepers_ranked_by_score() {
+        let mut three = list_of(3);
+        // A key listed twice still counts as one keeper.
+        three.coordinators.push(three.coordinators[0].clone());
+
+        for id in ids() {
+            let keepers = keepers(&id, &three);
+            assert_eq!(keepers.len(), 2);
+            assert_ne!(keepers[0], keepers[1]);
+            assert_eq!(Some(keepers[0]), owner(&id, &list_of(3)));
+        }
+        assert_eq!(keepers(&ids()[0], &list_of(1)).len(), 1);
+        assert!(keepers(&ids()[0], &list_of(0)).is_empty());
+    }
+
+    #[test]
+    fn when_the_first_keeper_leaves_the_second_moves_up() {
+        let three = list_of(3);
+        for id in ids() {
+            let before = keepers(&id, &three);
+            let mut two = three.clone();
+            two.coordinators
+                .retain(|coordinator| coordinator.key != before[0]);
+
+            assert_eq!(keepers(&id, &two)[0], before[1]);
         }
     }
 }

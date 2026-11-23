@@ -42,7 +42,7 @@ pub struct Coordinator {
     pub accounts: Arc<Accounts>,
     pub chunks: Arc<ChunkBook>,
     /// All coordinators, when there are several, among which this one keeps
-    /// only the chunks it is responsible for.
+    /// only the chunks it is a keeper of.
     pub chunk_owners: Option<Arc<CoordinatorList>>,
     pub failed_sign_ins: Arc<Mutex<FailedSignIns>>,
     pub mailbox_keys: Arc<MailboxKeys>,
