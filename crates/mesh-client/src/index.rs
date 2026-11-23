@@ -4,10 +4,11 @@
 //! Without it, losing a manifest loses the file. The index is a
 //! [`Collection`](crate::collection::Collection) under keys derived from the
 //! account's secret: one entry per file, named by the file's name, with its
-//! manifest and when its leases need renewing, and one entry per collection
-//! with that collection's own keys. A new device holding only the account's
-//! secret reads the account's pointer, then the index, then any file or
-//! collection.
+//! manifest and when its leases need renewing, one entry per collection
+//! with that collection's own keys, and one saying where the sign-in bundle
+//! is ([`sign_in_bundle`](crate::sign_in_bundle)). A new device holding only
+//! the account's secret reads the account's pointer, then the index, then
+//! any file or collection.
 //!
 //! All devices of an account move the same pointer. When a device finds a
 //! version there it has not seen, another device saved in the meantime: it
@@ -44,6 +45,7 @@ use crate::commits::{FetchCommitError, PublishHeadError, ReadHeadError};
 use crate::manifest::Manifest;
 use crate::node_client::NodeClient;
 use crate::node_list::NodeList;
+use crate::sign_in_bundle::{BundleError, BundlePlace, store_bundle};
 use crate::tab_renewal::{NodePrices, pieces_by_node, renew_through_tabs};
 use crate::upload::UploadError;
 use crate::version_graph::{Change, Entries, MissingCommit};
@@ -62,12 +64,21 @@ pub const FIELD_COLLECTION_KEYS: u32 = 4;
 /// its own, named after its message, so devices adding and using tokens at
 /// once merge without losing any.
 pub const FIELD_TOKEN: u32 = 5;
+/// The field of the sign-in entry holding where the account's sign-in
+/// bundle is, as [`BundlePlace::to_hex`] writes it.
+pub const FIELD_SIGN_IN_PLACE: u32 = 6;
 
-/// What collection entries' names start with. No file name holds a NUL
-/// byte on any system, so a collection can never share an entry with a file.
+/// What the names of entries that are not files start with. No file name
+/// holds a NUL byte on any system, so they can never share an entry with a
+/// file.
+const NOT_A_FILE: char = '\0';
+/// What collection entries' names start with.
 const COLLECTION_PREFIX: &str = "\0collection/";
-/// What wallet entries' names start with, for the same reason.
+/// What wallet entries' names start with.
 const TOKEN_PREFIX: &str = "\0token/";
+/// The entry that says where the account's sign-in bundle is, so that any
+/// device can renew it without knowing the password.
+const SIGN_IN_ENTRY: &str = "\0sign-in";
 
 /// One file in the index.
 #[derive(Clone)]
@@ -137,6 +148,8 @@ pub enum IndexError {
     CollectionExists(String),
     #[error("registering chunks for repair: {0}")]
     Register(#[from] RegisterError),
+    #[error("renewing the sign-in bundle: {0}")]
+    SignInBundle(#[from] BundleError),
 }
 
 impl From<CollectionError> for IndexError {
@@ -165,8 +178,7 @@ impl Index {
     pub fn files(&self) -> Result<Vec<IndexedFile>, IndexError> {
         self.entries()?
             .iter()
-            .filter(|(name, _)| !name.starts_with(COLLECTION_PREFIX))
-            .filter(|(name, _)| !name.starts_with(TOKEN_PREFIX))
+            .filter(|(name, _)| !name.starts_with(NOT_A_FILE))
             .map(|(name, fields)| to_file(name, fields))
             .collect()
     }
@@ -249,6 +261,35 @@ impl Index {
             .collect())
     }
 
+    /// Where the account's sign-in bundle is, if the index says.
+    pub fn sign_in_place(&self) -> Result<Option<BundlePlace>, IndexError> {
+        let entries = self.entries()?;
+        let Some(fields) = entries.get(SIGN_IN_ENTRY) else {
+            return Ok(None);
+        };
+        let place = fields
+            .get(&FIELD_SIGN_IN_PLACE)
+            .and_then(Value::as_str)
+            .and_then(BundlePlace::from_hex)
+            .ok_or_else(|| IndexError::Damaged("the sign-in bundle".to_string()))?;
+        Ok(Some(place))
+    }
+
+    /// Records `place` as where the account's sign-in bundle is, replacing
+    /// any earlier one, and saves the index.
+    pub async fn keep_sign_in_place(
+        &mut self,
+        session: &Session<'_>,
+        place: &BundlePlace,
+    ) -> Result<(), IndexError> {
+        let changes = vec![set(
+            SIGN_IN_ENTRY,
+            FIELD_SIGN_IN_PLACE,
+            json!(place.to_hex()),
+        )];
+        self.save(session, changes).await
+    }
+
     /// The tokens in the account's wallet.
     pub fn wallet(&self) -> Result<Wallet, IndexError> {
         let mut tokens = Vec::new();
@@ -283,8 +324,8 @@ impl Index {
     }
 
     /// Renews everything the account keeps for `session.lease`: every file's
-    /// pieces, the index's own commits, and its pointer. Files whose pieces
-    /// all held get the new renewal date.
+    /// pieces, the index's own commits, and its pointer, and the sign-in
+    /// bundle. Files whose pieces all held get the new renewal date.
     ///
     /// All pieces go out in one request per node, however many files there
     /// are. The index's commits are renewed with them; letting those expire
@@ -389,6 +430,18 @@ impl Index {
         let collections_renewed = kept.len();
         for (keys, collection) in kept {
             collection.publish(&session.writer_for(keys)).await?;
+        }
+        // Without its bundle the account can't be signed in to on a new
+        // device, even though everything else of it lives on.
+        if let Some(place) = self.sign_in_place()? {
+            store_bundle(
+                session.client,
+                session.list,
+                &place,
+                session.account,
+                session.lease,
+            )
+            .await?;
         }
         Ok(IndexRenewal {
             pieces_renewed: renewal.renewed.len(),
