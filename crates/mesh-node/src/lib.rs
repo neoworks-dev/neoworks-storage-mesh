@@ -15,6 +15,7 @@ mod bucket;
 mod clock;
 mod lease_table;
 mod mailbox_routes;
+mod mailbox_senders;
 mod mailbox_store;
 mod node_data;
 mod node_key;
@@ -42,6 +43,7 @@ pub use routes::router;
 pub use settings::NodeSettings;
 pub use tab_book::TabBook;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
@@ -65,7 +67,11 @@ pub async fn serve(
         data.key,
         &settings,
     );
-    let server = axum::serve(listener, app);
+    // Contact mailboxes count messages by the address that sent them.
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    );
     let stores = sweep::Swept {
         pieces,
         pointers,

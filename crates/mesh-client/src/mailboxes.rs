@@ -9,9 +9,10 @@
 //! it survives some of them going away.
 //!
 //! A stranger writes to the recipient's personal mailbox and pays proof of
-//! work for it. Contacts write to a mailbox only the two of them can compute,
-//! from the shared secret of their own two mailbox keys, and pay nothing;
-//! a message there is known to come from that contact.
+//! work for it, about a second. Contacts write to a mailbox only the two of
+//! them can compute, from the shared secret of their own two mailbox keys,
+//! and pay a few milliseconds of work; a message there is known to come from
+//! that contact.
 //!
 //! Mailbox keys are found by email at a coordinator, which signs its answer.
 
@@ -135,20 +136,7 @@ pub async fn send(
     let week = week_of(now);
     let address = personal_address(recipient, week);
     let sealed = seal_to(recipient, message);
-    let for_work = sealed.clone();
-    // About a second of hashing, which would hold up every other task on
-    // this thread.
-    let nonce = tokio::task::spawn_blocking(move || find_work(&address, &for_work, week)).await?;
-    let query = format!("?week={week}&nonce={nonce}");
-    deliver(
-        client,
-        list,
-        MailboxKind::Personal,
-        &address,
-        &query,
-        &sealed,
-    )
-    .await
+    deliver_with_work(client, list, MailboxKind::Personal, address, week, sealed).await
 }
 
 /// Sends `message` to `contact` through the mailbox only the two of them can
@@ -161,10 +149,30 @@ pub async fn send_to_contact(
     message: &[u8],
     now: u64,
 ) -> Result<usize, SendError> {
+    let week = week_of(now);
     let shared = contact_secret(own_secret, contact);
-    let address = contact_address(&shared, contact, week_of(now));
+    let address = contact_address(&shared, contact, week);
     let sealed = seal_to(contact, message);
-    deliver(client, list, MailboxKind::Contact, &address, "", &sealed).await
+    deliver_with_work(client, list, MailboxKind::Contact, address, week, sealed).await
+}
+
+/// Finds the work `sealed` needs for the mailbox of `kind` at `address` in
+/// `week`, then delivers it there.
+async fn deliver_with_work(
+    client: &NodeClient,
+    list: &NodeList,
+    kind: MailboxKind,
+    address: [u8; 32],
+    week: u64,
+    sealed: Vec<u8>,
+) -> Result<usize, SendError> {
+    let for_work = sealed.clone();
+    // Up to a second of hashing, which would hold up every other task on
+    // this thread.
+    let nonce =
+        tokio::task::spawn_blocking(move || find_work(kind, &address, &for_work, week)).await?;
+    let query = format!("?week={week}&nonce={nonce}");
+    deliver(client, list, kind, &address, &query, &sealed).await
 }
 
 /// Appends `sealed` to the mailbox `address` on each of its nodes.

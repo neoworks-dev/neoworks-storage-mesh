@@ -2,18 +2,22 @@
 //!
 //! Mailboxes are free like pointers, so the node bounds them instead: a
 //! message is small, a mailbox holds a limited number, all mailboxes
-//! together get [`NodeSettings::mailbox_bytes`](crate::NodeSettings), and a
-//! message to a personal mailbox has to carry proof of work.
+//! together get [`NodeSettings::mailbox_bytes`](crate::NodeSettings), every
+//! message has to carry proof of work, and one sending address leaves only
+//! so many messages in one contact mailbox a week
+//! ([`mailbox_senders`](crate::mailbox_senders)).
+
+use std::net::SocketAddr;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::put;
 use mesh_core::mailbox::{
-    CONTACT_MAILBOX_ROUTE, MAILBOX_ROUTE, MAX_MESSAGE_BYTES, MESSAGE_LEASE_SECONDS,
-    MailboxContents, MailboxKind, WorkQuery, week_of, work_holds,
+    CONTACT_MAILBOX_ROUTE, MAILBOX_ROUTE, MAX_MESSAGE_BYTES, MAX_MESSAGES_PER_SENDER,
+    MESSAGE_LEASE_SECONDS, MailboxContents, MailboxKind, WorkQuery, week_of, work_holds,
 };
 use mesh_core::tokens::HexBytes;
 
@@ -39,31 +43,62 @@ async fn append_personal(
     let Some(address) = parse_address(&address) else {
         return bad_address();
     };
-    // Last week's too, so a message sent as the week turns is not refused.
-    // The work covers the week, so it can't be carried into a later one.
-    let this_week = week_of(unix_now());
-    if query.week != this_week && query.week + 1 != this_week {
-        let reason = "the week is not this week or last";
-        return (StatusCode::BAD_REQUEST, reason).into_response();
-    }
-    if !work_holds(&address, &body, query.week, query.nonce) {
-        let reason = "the nonce is not enough work for this message";
+    if let Some(reason) = work_refusal(MailboxKind::Personal, &address, &query, &body) {
         return (StatusCode::BAD_REQUEST, reason).into_response();
     }
     append(&node, MailboxKind::Personal, &address, &body).await
 }
 
-/// `PUT /contact-mailboxes/{address}`: appends the body to a contact
-/// mailbox.
+/// `PUT /contact-mailboxes/{address}?week=W&nonce=N`: appends the body to a
+/// contact mailbox, when it carries the contact work and its sender has not
+/// left its share of messages there this week.
 async fn append_contact(
     State(node): State<Node>,
+    ConnectInfo(sender): ConnectInfo<SocketAddr>,
     Path(address): Path<String>,
+    Query(query): Query<WorkQuery>,
     body: Bytes,
 ) -> Response {
     let Some(address) = parse_address(&address) else {
         return bad_address();
     };
-    append(&node, MailboxKind::Contact, &address, &body).await
+    if let Some(reason) = work_refusal(MailboxKind::Contact, &address, &query, &body) {
+        return (StatusCode::BAD_REQUEST, reason).into_response();
+    }
+    // Held until the message is counted, so a sender can't get many
+    // messages past the limit by sending them all at once.
+    let mut senders = node.contact_senders.lock().await;
+    if !senders.has_room(&address, sender.ip(), week_of(unix_now())) {
+        let reason = format!(
+            "at most {MAX_MESSAGES_PER_SENDER} messages a week from one address to one mailbox"
+        );
+        return (StatusCode::TOO_MANY_REQUESTS, reason).into_response();
+    }
+    let response = append(&node, MailboxKind::Contact, &address, &body).await;
+    if response.status().is_success() {
+        senders.record(&address, sender.ip());
+    }
+    response
+}
+
+/// Why `query` is not enough work for `body` to the mailbox of `kind` at
+/// `address`, or `None` when it is.
+fn work_refusal(
+    kind: MailboxKind,
+    address: &[u8; 32],
+    query: &WorkQuery,
+    body: &[u8],
+) -> Option<&'static str> {
+    // Last week's too, so a message sent as the week turns is not refused.
+    // The work covers the week, so it can't be carried into a later one.
+    let this_week = week_of(unix_now());
+    if query.week != this_week && query.week + 1 != this_week {
+        return Some("the week is not this week or last");
+    }
+    if !work_holds(kind, address, body, query.week, query.nonce) {
+        return Some("the nonce is not enough work for this message");
+    }
+    None
 }
 
 async fn append(node: &Node, kind: MailboxKind, address: &[u8; 32], body: &[u8]) -> Response {
