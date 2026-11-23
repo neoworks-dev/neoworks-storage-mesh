@@ -131,12 +131,26 @@ impl SignedBody for NodeSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatorKey(#[serde(with = "hex")] pub [u8; 32]);
 
-/// The coordinators whose snapshots a client accepts.
+/// The coordinators whose snapshots a client accepts, and where each is
+/// reached.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatorList {
     /// Goes up with every change to the list.
     pub version: u64,
-    pub keys: Vec<CoordinatorKey>,
+    pub coordinators: Vec<ListedCoordinator>,
+}
+
+/// One coordinator on a [`CoordinatorList`].
+///
+/// The URL is signed with the rest of the list, so nobody can send a client
+/// to another server under a listed coordinator's name; whoever answers
+/// there still has to sign with the key to be believed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedCoordinator {
+    pub key: CoordinatorKey,
+    /// Where clients reach the coordinator, such as
+    /// `https://coordinator.example.org`.
+    pub url: String,
 }
 
 impl SignedBody for CoordinatorList {
@@ -188,7 +202,7 @@ impl CoordinatorList {
         let signed = next
             .valid_signers()
             .into_iter()
-            .filter(|signer| self.keys.contains(&CoordinatorKey(*signer)))
+            .filter(|signer| self.contains(&CoordinatorKey(*signer)))
             .count();
         let needed = self.majority();
         if signed < needed {
@@ -200,12 +214,23 @@ impl CoordinatorList {
     /// How many of the coordinators on this list make a majority. A key
     /// listed twice counts once, so listing a key again cannot weigh it more.
     fn majority(&self) -> usize {
-        let distinct_keys: HashSet<[u8; 32]> = self.keys.iter().map(|key| key.0).collect();
+        let distinct_keys: HashSet<[u8; 32]> = self
+            .coordinators
+            .iter()
+            .map(|coordinator| coordinator.key.0)
+            .collect();
         distinct_keys.len() / 2 + 1
     }
 
+    /// Whether the coordinator with `key` is on the list.
+    pub fn contains(&self, key: &CoordinatorKey) -> bool {
+        self.coordinators
+            .iter()
+            .any(|coordinator| coordinator.key == *key)
+    }
+
     fn check_signer(&self, signer: [u8; 32]) -> Result<(), TrustError> {
-        if !self.keys.contains(&CoordinatorKey(signer)) {
+        if !self.contains(&CoordinatorKey(signer)) {
             return Err(TrustError::UnknownSigner);
         }
         Ok(())
@@ -237,9 +262,12 @@ mod tests {
     fn list_of(keys: &[&SigningKey]) -> CoordinatorList {
         CoordinatorList {
             version: 1,
-            keys: keys
+            coordinators: keys
                 .iter()
-                .map(|key| CoordinatorKey(key.verifying_key().to_bytes()))
+                .map(|key| ListedCoordinator {
+                    key: CoordinatorKey(key.verifying_key().to_bytes()),
+                    url: "https://coordinator.example.org".into(),
+                })
                 .collect(),
         }
     }
@@ -375,6 +403,23 @@ mod tests {
             Err(TrustError::NotNewer {
                 offered: 1,
                 current: 1
+            })
+        );
+    }
+
+    #[test]
+    fn a_coordinators_url_is_signed_with_the_list() {
+        let first = key(10);
+        let list = list_of(&[&first]);
+        let mut signed = MultiSigned::sign(&[&first], version(list.clone(), 2));
+
+        signed.body.coordinators[0].url = "https://attacker.example.org".into();
+
+        assert_eq!(
+            list.successor(&signed),
+            Err(TrustError::TooFewSignatures {
+                signed: 0,
+                needed: 1
             })
         );
     }

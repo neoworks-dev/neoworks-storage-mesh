@@ -44,6 +44,7 @@ async fn saving_the_index_tells_the_other_devices_which_version_it_wrote() {
         account: &account,
         device: "laptop".to_string(),
         lease: LEASE,
+        coordinators: None,
     };
     let mut index = Index::default();
 
@@ -72,6 +73,7 @@ async fn another_account_reads_no_notices() {
         account: &account,
         device: "laptop".to_string(),
         lease: LEASE,
+        coordinators: None,
     };
     Index::default().save(&session, set("one")).await.unwrap();
 

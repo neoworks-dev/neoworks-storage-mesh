@@ -34,6 +34,7 @@ fn session<'a>(client: &'a NodeClient, list: &'a NodeList, account: &'a Account)
         account,
         device: "laptop".into(),
         lease: LEASE,
+        coordinators: None,
     }
 }
 
@@ -65,6 +66,7 @@ async fn calendar_with_an_event(
         dedup_key: account.dedup_key(),
         device: "laptop".into(),
         lease: LEASE,
+        coordinators: None,
     };
     let mut calendar = Collection::default();
     calendar.save(&writer, event("dentist")).await.unwrap();

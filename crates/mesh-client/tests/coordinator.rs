@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use mesh_client::{NodeClient, NodeList, NodeListError};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
-use mesh_core::node_list::{CoordinatorKey, CoordinatorList, NodeSnapshot, TrustError};
+use mesh_core::node_list::{
+    CoordinatorKey, CoordinatorList, ListedCoordinator, NodeSnapshot, TrustError,
+};
 use mesh_core::signed::{Signed, SigningKey};
 use mesh_node::{NodeSettings, Registration, register};
 use tempfile::TempDir;
@@ -19,16 +21,19 @@ const LEASE: Duration = Duration::from_secs(24 * 60 * 60);
 async fn start_coordinator() -> (TempDir, String, CoordinatorList) {
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: url.clone(),
+        }],
     };
     let settings = CoordinatorSettings {
         publish_interval: Duration::from_millis(100),
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     (directory, url, coordinators)
 }
@@ -87,7 +92,10 @@ async fn a_list_signed_by_an_unknown_coordinator_is_refused() {
     let (_coordinator_data, coordinator, _coordinators) = start_coordinator().await;
     let strangers = CoordinatorList {
         version: 1,
-        keys: vec![CoordinatorKey([7; 32])],
+        coordinators: vec![ListedCoordinator {
+            key: CoordinatorKey([7; 32]),
+            url: coordinator.clone(),
+        }],
     };
     let client = NodeClient::new().unwrap();
     // The first snapshot is published right after start.
@@ -144,12 +152,15 @@ async fn the_kept_list_is_used_while_the_coordinator_is_down() {
 async fn without_a_kept_list_an_unreachable_coordinator_is_an_error() {
     let client = NodeClient::new().unwrap();
     let state = tempfile::tempdir().unwrap();
+    let down = unreachable_url().await;
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![CoordinatorKey([7; 32])],
+        coordinators: vec![ListedCoordinator {
+            key: CoordinatorKey([7; 32]),
+            url: down.clone(),
+        }],
     };
 
-    let down = unreachable_url().await;
     let result = NodeList::fetch_keeping_newest(
         &client,
         &down,
@@ -169,9 +180,10 @@ async fn a_list_older_than_the_kept_one_is_refused() {
     // A second coordinator has signed a snapshot from far in the future,
     // which makes everything the first one publishes now look old.
     let other_coordinator = SigningKey::from_bytes(&[3; 32]);
-    coordinators
-        .keys
-        .push(CoordinatorKey(other_coordinator.verifying_key().to_bytes()));
+    coordinators.coordinators.push(ListedCoordinator {
+        key: CoordinatorKey(other_coordinator.verifying_key().to_bytes()),
+        url: "https://other-coordinator.example.org".into(),
+    });
     let newer = NodeSnapshot {
         published_at: u64::from(u32::MAX),
         nodes: Vec::new(),

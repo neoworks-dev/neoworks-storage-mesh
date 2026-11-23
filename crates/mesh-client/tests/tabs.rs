@@ -7,13 +7,15 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use mesh_client::account::Account;
+use mesh_client::index::{Index, Session, unix_now};
 use mesh_client::sign_in::{auth_key, sign_up};
+use mesh_client::tab_renewal::NodePrices;
 use mesh_client::tabs::{move_into_tabs, new_tab_name, open_tabs};
 use mesh_client::tokens::get_tokens;
 use mesh_client::{NodeClient, NodeRequestError, upload};
 use mesh_coordinator::{CoordinatorData, CoordinatorSettings};
 use mesh_core::PieceId;
-use mesh_core::node_list::{CoordinatorList, NodeSnapshot};
+use mesh_core::node_list::{CoordinatorList, ListedCoordinator, NodeSnapshot};
 use mesh_core::sign_in::KdfParams;
 use mesh_core::signed::Signed;
 use mesh_core::tokens::{Token, TokenKind};
@@ -44,9 +46,14 @@ async fn start_with_account() -> (
     let directory = tempfile::tempdir().unwrap();
     let data = CoordinatorData::open(directory.path()).unwrap();
     data.credit("ana@example.org", 20).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     let coordinators = CoordinatorList {
         version: 1,
-        keys: vec![data.public_key()],
+        coordinators: vec![ListedCoordinator {
+            key: data.public_key(),
+            url: coordinator.clone(),
+        }],
     };
     // Fast rounds, so the nodes are measured, listed and priced at once.
     let settings = CoordinatorSettings {
@@ -55,8 +62,6 @@ async fn start_with_account() -> (
         speed_test_interval: Duration::from_millis(100),
         ..CoordinatorSettings::default()
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let coordinator = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(mesh_coordinator::serve(listener, data, settings));
     let nodes = start_nodes(NodeSettings {
         require_tokens: Some(coordinator.clone()),
@@ -195,6 +200,67 @@ async fn a_file_stored_against_paid_tabs_comes_back_and_renews() {
 
     assert_eq!(renewed, manifest.chunks.len() * 6);
     assert_eq!(wallet.len(), 20 - 12);
+}
+
+#[tokio::test]
+async fn an_account_renews_through_tabs_paid_from_its_wallet() {
+    let (_data, nodes, mut tokens, coordinator, coordinators, _auth) = start_with_account().await;
+    let client = NodeClient::new().unwrap();
+    let list = node_list(&nodes);
+    let account = Account::generate();
+    let session = Session {
+        client: &client,
+        list: &list,
+        account: &account,
+        device: "laptop".into(),
+        lease: LEASE,
+        coordinators: None,
+    };
+    // Storing pays this month's tabs, one token per node.
+    let node_urls = urls(&nodes);
+    let nodes_by_url: Vec<&str> = node_urls.iter().map(String::as_str).collect();
+    open_tabs(&client, &nodes_by_url, &mut tokens, 1)
+        .await
+        .unwrap();
+    let mut index = Index::default();
+    let file = random_file(100_000, 7);
+    let manifest = upload(
+        &client,
+        &list,
+        &account.dedup_key(),
+        file.as_slice(),
+        LEASE,
+        &[],
+    )
+    .await
+    .unwrap();
+    index
+        .add_file(&session, "photo.jpg", &manifest, unix_now() + 60)
+        .await
+        .unwrap();
+    index.add_tokens(&session, &tokens).await.unwrap();
+    // The wallet's entries are not files.
+    assert_eq!(index.files().unwrap().len(), 1);
+    // Another device of the account spent the token the wallet hands out
+    // first in the meantime.
+    let first = index.wallet().unwrap().take(1, false);
+    NodeClient::new()
+        .unwrap()
+        .pay_tab(&nodes[0].url, &new_tab_name(), &first)
+        .await
+        .unwrap();
+    let prices = NodePrices::fetch(&client, &coordinator, &coordinators)
+        .await
+        .unwrap();
+
+    let renewal = index.renew_through_tabs(&session, &prices).await.unwrap();
+
+    assert_eq!(renewal.pieces_not_renewed, 0);
+    assert!(renewal.at_risk.is_empty());
+    assert!(index.file("photo.jpg").unwrap().unwrap().renew_by > unix_now() + 60);
+    // A month of these few pieces costs well under one token per node, so
+    // six tabs take six tokens, and the spent one was replaced by the next.
+    assert_eq!(index.wallet().unwrap().tokens().len(), 14 - 7);
 }
 
 #[tokio::test]

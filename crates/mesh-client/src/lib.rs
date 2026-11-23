@@ -61,10 +61,12 @@ mod random;
 mod renew;
 mod repair;
 pub mod sign_in;
+pub mod tab_renewal;
 pub mod tabs;
 pub mod tokens;
 mod upload;
 pub mod version_graph;
+pub mod wallet;
 
 pub use audit::{AUDIT_DEADLINE, AUDIT_SEGMENTS, AuditReport, ChunkAudit, PieceHealth, audit};
 pub use download::{CHUNKS_IN_FLIGHT, DownloadError, download};
