@@ -39,7 +39,8 @@ coordinator, which checks that nodes are up, audits them with small pieces
 of its own, measures how fast they are and publishes a signed list of them.
 Clients register their chunks there by piece ids, without keys, and the
 coordinator rebuilds the pieces of nodes that go down while the owner's
-devices are off.
+devices are off. With several coordinators, each chunk is registered with
+two of them, and the second repairs it while the first is offline.
 
 Storage is paid in tokens worth 0.1 euro cents each, signed blind so that
 nodes and coordinators can't tell whose they are. Nodes never set prices:
@@ -165,6 +166,16 @@ target/release/mesh fetch photo.jpg photo-again.jpg $N --index other-device.json
 To keep everything stored, run `mesh renew-all $N` from a timer, for
 example weekly. It renews every file, the index and its pointer with one
 request per node, and warns about files that lost too many pieces.
+
+Nodes that require tokens are renewed by moving their pieces into a new tab
+each month, paid from the account's wallet, which the index keeps so every
+device shares it. Fill it with tokens from your balance, or with
+`--allowance` from the free allowance; the password is read from standard
+input:
+
+```sh
+target/release/mesh take-tokens ana@example.org --count 20 $N
+```
 
 `account.key` holds the secret: keep it private, since it opens every file
 of the account. To get it onto another device without copying the file,

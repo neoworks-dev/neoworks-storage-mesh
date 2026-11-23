@@ -47,9 +47,10 @@ pub struct CoordinatorSettings {
     /// within it, and nothing is rebuilt for nothing.
     pub repair_delay: Duration,
     /// All coordinators, when there are several: this one keeps only the
-    /// chunks it is responsible for among them
-    /// (`mesh_core::chunk_registry::responsible_coordinator`). `None` keeps
-    /// every chunk, as the only coordinator does.
+    /// chunks it is one of the two keepers of among them
+    /// (`mesh_core::chunk_registry::chunk_keepers`), and repairs those it is
+    /// the second keeper of only while the first is unreachable. `None` keeps
+    /// and repairs every chunk, as the only coordinator does.
     pub coordinators: Option<CoordinatorList>,
     /// How often every node is challenged for the coordinator's audit piece.
     pub audit_interval: Duration,

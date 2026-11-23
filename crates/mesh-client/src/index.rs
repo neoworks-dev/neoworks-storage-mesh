@@ -15,6 +15,9 @@
 //! version higher. Two devices adding files while apart therefore both keep
 //! their files.
 //!
+//! The index also holds the account's wallet ([`crate::wallet`]): the tokens
+//! that pay nodes which require them, one entry per token.
+//!
 //! With a coordinator list, every file and commit stored through the index
 //! is registered for repair with the coordinators responsible for its
 //! chunks, and renewing registers them again until the new date. Reading the
@@ -25,6 +28,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use mesh_core::node_list::CoordinatorList;
+use mesh_core::tokens::{MONTH_SECONDS, Token};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -40,8 +44,10 @@ use crate::commits::{FetchCommitError, PublishHeadError, ReadHeadError};
 use crate::manifest::Manifest;
 use crate::node_client::NodeClient;
 use crate::node_list::NodeList;
+use crate::tab_renewal::{NodePrices, pieces_by_node, renew_through_tabs};
 use crate::upload::UploadError;
 use crate::version_graph::{Change, Entries, MissingCommit};
+use crate::wallet::Wallet;
 
 /// The field of an entry holding the file's manifest.
 pub const FIELD_MANIFEST: u32 = 1;
@@ -52,10 +58,16 @@ pub const FIELD_RENEW_BY: u32 = 3;
 /// The field of a collection's entry holding its keys, as
 /// [`CollectionKeys::to_hex`] writes them.
 pub const FIELD_COLLECTION_KEYS: u32 = 4;
+/// The field of a wallet entry holding one token. Each token is an entry of
+/// its own, named after its message, so devices adding and using tokens at
+/// once merge without losing any.
+pub const FIELD_TOKEN: u32 = 5;
 
 /// What collection entries' names start with. No file name holds a NUL
 /// byte on any system, so a collection can never share an entry with a file.
 const COLLECTION_PREFIX: &str = "\0collection/";
+/// What wallet entries' names start with, for the same reason.
+const TOKEN_PREFIX: &str = "\0token/";
 
 /// One file in the index.
 #[derive(Clone)]
@@ -154,6 +166,7 @@ impl Index {
         self.entries()?
             .iter()
             .filter(|(name, _)| !name.starts_with(COLLECTION_PREFIX))
+            .filter(|(name, _)| !name.starts_with(TOKEN_PREFIX))
             .map(|(name, fields)| to_file(name, fields))
             .collect()
     }
@@ -236,6 +249,39 @@ impl Index {
             .collect())
     }
 
+    /// The tokens in the account's wallet.
+    pub fn wallet(&self) -> Result<Wallet, IndexError> {
+        let mut tokens = Vec::new();
+        for (name, fields) in self.entries()? {
+            if !name.starts_with(TOKEN_PREFIX) {
+                continue;
+            }
+            let token = fields
+                .get(&FIELD_TOKEN)
+                .and_then(|token| serde_json::from_value(token.clone()).ok())
+                .ok_or_else(|| IndexError::Damaged(name.clone()))?;
+            tokens.push(token);
+        }
+        Ok(Wallet::new(tokens))
+    }
+
+    /// Adds `tokens` to the account's wallet and saves the index.
+    pub async fn add_tokens(
+        &mut self,
+        session: &Session<'_>,
+        tokens: &[Token],
+    ) -> Result<(), IndexError> {
+        let changes = tokens
+            .iter()
+            // A token is plain integers and bytes, which always serialize.
+            .map(|token| {
+                let value = serde_json::to_value(token).expect("a token serializes");
+                set(&token_entry(token), FIELD_TOKEN, value)
+            })
+            .collect();
+        self.save(session, changes).await
+    }
+
     /// Renews everything the account keeps for `session.lease`: every file's
     /// pieces, the index's own commits, and its pointer. Files whose pieces
     /// all held get the new renewal date.
@@ -260,6 +306,28 @@ impl Index {
         session: &Session<'_>,
         collections: &mut BTreeMap<String, Collection>,
     ) -> Result<IndexRenewal, IndexError> {
+        self.renew_paying(session, collections, None).await
+    }
+
+    /// Renews like [`renew`](Self::renew), but pieces on nodes that require
+    /// tokens are moved into a new tab on each node, paid from the account's
+    /// wallet at the node's price in `prices`. Tabs last a month, so files
+    /// renewed this way are due again within one.
+    pub async fn renew_through_tabs(
+        &mut self,
+        session: &Session<'_>,
+        prices: &NodePrices,
+    ) -> Result<IndexRenewal, IndexError> {
+        self.renew_paying(session, &mut BTreeMap::new(), Some(prices))
+            .await
+    }
+
+    async fn renew_paying(
+        &mut self,
+        session: &Session<'_>,
+        collections: &mut BTreeMap<String, Collection>,
+        prices: Option<&NodePrices>,
+    ) -> Result<IndexRenewal, IndexError> {
         self.pull(session).await?;
         let files = self.files()?;
         let mut commit_manifests = self.collection.commit_manifests()?;
@@ -280,14 +348,25 @@ impl Index {
         for manifest in &mut commit_manifests {
             take_moved_pieces(session, manifest).await?;
         }
-        let renewed_until = unix_now() + session.lease.as_secs();
-        let pieces = files
+        let manifests: Vec<&Manifest> = files
             .iter()
             .map(|file| &file.manifest)
             .chain(&commit_manifests)
+            .collect();
+        let pieces = manifests
+            .iter()
             .flat_map(|manifest| &manifest.chunks)
             .flat_map(|chunk| &chunk.pieces);
-        let renewal = renew_pieces(session.client, session.list, pieces, session.lease).await;
+        let mut renewal = renew_pieces(session.client, session.list, pieces, session.lease).await;
+        let mut lease = session.lease.as_secs();
+        let mut changes = Vec::new();
+        if let Some(prices) = prices {
+            lease = lease.min(MONTH_SECONDS);
+            changes = self
+                .pay_tabs(session, prices, &manifests, &mut renewal)
+                .await?;
+        }
+        let renewed_until = unix_now() + lease;
         let (safe, at_risk): (Vec<IndexedFile>, Vec<IndexedFile>) = files
             .into_iter()
             .partition(|file| is_readable(&file.manifest, &renewal));
@@ -296,10 +375,10 @@ impl Index {
             .map(|file| &file.manifest)
             .chain(&commit_manifests);
         register_all(session, renewed_manifests, renewed_until).await?;
-        let changes: Vec<Change> = safe
-            .iter()
-            .map(|file| set(&file.name, FIELD_RENEW_BY, json!(renewed_until)))
-            .collect();
+        changes.extend(
+            safe.iter()
+                .map(|file| set(&file.name, FIELD_RENEW_BY, json!(renewed_until))),
+        );
         // Saving writes the pointer anew, which renews it too.
         if changes.is_empty() {
             self.collection.publish(&session.writer()).await?;
@@ -318,6 +397,35 @@ impl Index {
             collections_renewed,
             unknown_collections,
         })
+    }
+
+    /// Renews the pieces of `manifests` on the nodes `renewal` found to
+    /// require tokens through tabs paid from the wallet, counts them as
+    /// renewed in `renewal`, and returns the changes that take the tokens
+    /// handed over out of the wallet.
+    async fn pay_tabs(
+        &self,
+        session: &Session<'_>,
+        prices: &NodePrices,
+        manifests: &[&Manifest],
+        renewal: &mut BatchRenewal,
+    ) -> Result<Vec<Change>, IndexError> {
+        let pieces = pieces_by_node(manifests, &renewal.requires_tokens);
+        let mut wallet = self.wallet()?;
+        let paid =
+            renew_through_tabs(session.client, session.list, prices, &mut wallet, &pieces).await;
+        for key in paid.renewed {
+            renewal.not_renewed.remove(&key);
+            renewal.renewed.insert(key);
+        }
+        let changes = paid
+            .used
+            .iter()
+            .map(|token| Change::Remove {
+                entry: token_entry(token),
+            })
+            .collect();
+        Ok(changes)
     }
 
     /// Brings this device's index up to date with the account's pointer,
@@ -448,6 +556,11 @@ fn to_file(name: &str, fields: &BTreeMap<u32, Value>) -> Result<IndexedFile, Ind
 }
 
 /// The keys of the collection `name` from its entry's fields.
+/// The name of the wallet entry holding `token`.
+fn token_entry(token: &Token) -> String {
+    format!("{TOKEN_PREFIX}{}", hex::encode(token.message))
+}
+
 fn to_keys(name: &str, fields: &BTreeMap<u32, Value>) -> Result<CollectionKeys, IndexError> {
     fields
         .get(&FIELD_COLLECTION_KEYS)

@@ -25,7 +25,7 @@ use mesh_core::protocol::{
 };
 use mesh_core::signed::SigningKey;
 use mesh_core::tabs::StoreQuery;
-use mesh_core::{NodeId, PieceId, merkle};
+use mesh_core::{NodeId, PieceId};
 use tokio::sync::Mutex;
 
 use crate::clock::unix_now;
@@ -33,7 +33,7 @@ use crate::mailbox_routes;
 use crate::mailbox_senders::ContactSenders;
 use crate::mailbox_store::MailboxStore;
 use crate::own_price::OwnPrice;
-use crate::piece_store::{PieceStore, StoreError};
+use crate::piece_store::{ChallengeAnswer, PieceStore, StoreError};
 use crate::pointer_store::{PointerPut, PointerStore, PointerStoreError};
 use crate::settings::NodeSettings;
 use crate::speed_test::{self, SpeedTests};
@@ -248,8 +248,8 @@ async fn get_piece(State(node): State<Node>, Path(id): Path<PieceId>) -> Respons
 
 /// `POST /pieces/{id}/challenge`: the segments asked for, with their proofs.
 ///
-/// The node builds the proofs from the piece itself, so it needs every byte
-/// of the piece at hand to answer; that is the point of the challenge.
+/// The node builds the proofs from the segments' bytes, so it needs the
+/// bytes of the piece at hand to answer; that is the point of the challenge.
 async fn answer_challenge(
     State(node): State<Node>,
     Path(id): Path<PieceId>,
@@ -259,21 +259,18 @@ async fn answer_challenge(
         let reason = format!("a challenge asks for 1 to {MAX_CHALLENGE_SEGMENTS} segments");
         return (StatusCode::BAD_REQUEST, reason).into_response();
     }
-    let piece = match node.store.get(&id, unix_now()).await {
-        Ok(Some(piece)) => piece,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(error) => return internal_error(&id, error),
-    };
-    let mut proofs = Vec::with_capacity(request.segments.len());
-    for &index in &request.segments {
-        let Some(proof) = merkle::prove(&piece, index) else {
-            let segment_count = merkle::segment_count(piece.len());
+    match node.store.prove(&id, &request.segments, unix_now()).await {
+        Ok(ChallengeAnswer::Proofs(proofs)) => Json(ChallengeResponse { proofs }).into_response(),
+        Ok(ChallengeAnswer::NotHeld) => StatusCode::NOT_FOUND.into_response(),
+        Ok(ChallengeAnswer::NoSegment {
+            index,
+            segment_count,
+        }) => {
             let reason = format!("there is no segment {index}: the piece has {segment_count}");
-            return (StatusCode::BAD_REQUEST, reason).into_response();
-        };
-        proofs.push(proof);
+            (StatusCode::BAD_REQUEST, reason).into_response()
+        }
+        Err(error) => internal_error(&id, error),
     }
-    Json(ChallengeResponse { proofs }).into_response()
 }
 
 /// `PUT /pointers/{owner}?lease_seconds=N`: stores the pointer in the body

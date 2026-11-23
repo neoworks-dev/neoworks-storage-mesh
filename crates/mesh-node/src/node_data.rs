@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! <data>/node.key                 the node's own key; its id is the hash
-//! <data>/pieces/<64 hex digits>   one file per piece
+//! <data>/pieces/<64 hex digits>   one file per piece, unless they are kept
+//!                                 in a bucket
 //! <data>/leases.sqlite3           when each piece's lease ends
 //! <data>/pointers.sqlite3         signed pointers and their leases
 //! <data>/tabs.sqlite3             paid tabs and what they hold
@@ -15,6 +16,7 @@ use mesh_core::NodeId;
 use mesh_core::pointer::SigningKey;
 use mesh_core::protocol::NodeIdentity;
 
+use crate::bucket::Bucket;
 use crate::mailbox_store::MailboxStore;
 use crate::node_key::{self, NodeKeyError};
 use crate::piece_store::{PieceStore, StoreError};
@@ -47,6 +49,21 @@ impl NodeData {
     pub async fn open(directory: impl AsRef<Path>) -> Result<Self, OpenError> {
         let directory = directory.as_ref();
         let pieces = PieceStore::open(directory).await?;
+        Self::open_with_pieces(directory, pieces)
+    }
+
+    /// Opens the data in `directory` like [`open`](Self::open), but keeps
+    /// pieces in `bucket` instead of in the directory.
+    pub async fn open_with_bucket(
+        directory: impl AsRef<Path>,
+        bucket: Bucket,
+    ) -> Result<Self, OpenError> {
+        let directory = directory.as_ref();
+        let pieces = PieceStore::open_with_bucket(directory, bucket).await?;
+        Self::open_with_pieces(directory, pieces)
+    }
+
+    fn open_with_pieces(directory: &Path, pieces: PieceStore) -> Result<Self, OpenError> {
         let pointers = PointerStore::open(directory)?;
         let tabs = TabBook::open(directory)?;
         let mailboxes = MailboxStore::open(directory)?;
