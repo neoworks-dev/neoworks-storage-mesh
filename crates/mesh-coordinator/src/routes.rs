@@ -1,7 +1,8 @@
 //! The coordinator's HTTP interface: nodes register and name their operator,
 //! clients fetch the node list and the prices and register chunks for repair
-//! ([`chunk_routes`]), people sign up and sign in ([`sign_in_routes`]), and
-//! they find each other's mailbox keys ([`mailbox_key_routes`]).
+//! ([`chunk_routes`]), people sign up and sign in ([`sign_in_routes`]),
+//! they find each other's mailbox keys ([`mailbox_key_routes`]), and web
+//! pages reach nodes through the gateway ([`gateway`]).
 
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use crate::chunk_book::ChunkBook;
 use crate::chunk_routes;
 use crate::clock::unix_now;
 use crate::earnings::{Earnings, Linked};
+use crate::gateway;
 use crate::mailbox_key_routes;
 use crate::mailbox_keys::MailboxKeys;
 use crate::price_book::LatestPrices;
@@ -52,6 +54,9 @@ pub struct Coordinator {
     pub latest: Arc<LatestSnapshot>,
     pub prices: Arc<LatestPrices>,
     pub http: reqwest::Client,
+    /// Forwards gateway requests, with a timeout long enough for a whole
+    /// piece to a slow home node.
+    pub gateway_http: reqwest::Client,
     /// How far a record's signing time may be from now, in seconds.
     pub max_record_age_seconds: u64,
     /// The allowance tokens each account gets per month.
@@ -71,6 +76,7 @@ pub fn router(coordinator: Coordinator) -> Router {
         .merge(token_routes::routes())
         .merge(chunk_routes::routes())
         .merge(mailbox_key_routes::routes())
+        .merge(gateway::routes())
         .with_state(coordinator)
 }
 

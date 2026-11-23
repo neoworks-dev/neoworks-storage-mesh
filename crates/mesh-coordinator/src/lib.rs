@@ -24,7 +24,9 @@
 //! spent ones, and pays what a node was paid to its operator's balance over
 //! the month, for as long as the node stays up. An account that stops taking
 //! tokens gets warned by email before its data expires. Accounts also file
-//! their mailbox key here, so others can look it up by email. The
+//! their mailbox key here, so others can look it up by email. Web pages,
+//! which can't call plain-HTTP nodes, reach nodes through the coordinator's
+//! HTTPS gateway ([`gateway`]). The
 //! `mesh-coordinator` binary runs one; tests start coordinators in-process
 //! through [`serve`].
 
@@ -37,6 +39,7 @@ mod clock;
 mod coordinator_key;
 mod earnings;
 mod expiry_warnings;
+mod gateway;
 mod locate;
 mod mailbox_key_routes;
 mod mailbox_keys;
@@ -86,6 +89,10 @@ use crate::token_issuer::TokenIssuer;
 
 /// How long the coordinator waits for a node to answer a check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the gateway waits for a node. A 9 MiB piece at 2 Mbit/s, a slow
+/// home upload, takes about 40 seconds.
+const GATEWAY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A coordinator's registry, accounts and key, from its data directory:
 ///
@@ -230,6 +237,10 @@ pub async fn serve(
         latest: latest.clone(),
         prices: prices.clone(),
         http: http.clone(),
+        gateway_http: reqwest::Client::builder()
+            .timeout(GATEWAY_TIMEOUT)
+            .build()
+            .map_err(std::io::Error::other)?,
         max_record_age_seconds: settings.max_record_age.as_secs(),
         monthly_allowance: settings.monthly_allowance,
         own_nodes: Arc::new(settings.own_nodes.clone()),
