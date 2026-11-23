@@ -1,6 +1,6 @@
 //! The `mesh` commands that work through an account's index instead of
 //! manifest files: `account-new`, `sign-up`, `sign-in`, `store`, `ls`,
-//! `fetch` and `renew-all`.
+//! `fetch`, `renew-all` and `take-tokens`.
 //!
 //! The account's secret lives in a file, and this device's copy of the index
 //! in another, so that only what changed since the last run is fetched.
@@ -12,10 +12,16 @@ use anyhow::Context;
 use clap::Args;
 use mesh_client::account::Account;
 use mesh_client::index::{Index, Session, unix_now};
+use mesh_client::tab_renewal::NodePrices;
+use mesh_client::tokens::get_tokens;
 use mesh_client::{NodeClient, NodeList, upload};
 use mesh_core::sign_in::KdfParams;
+use mesh_core::tokens::TokenKind;
 
-use crate::{NodeListArguments, days_to_duration, download_to, load_node_list};
+use crate::{
+    NodeListArguments, coordinator_of, days_to_duration, download_to, load_node_list,
+    read_coordinator_list,
+};
 
 /// What every account command needs.
 #[derive(Args)]
@@ -126,6 +132,7 @@ pub async fn store(
     };
     let account = read_account(&arguments.account)?;
     let list = load_node_list(client, &arguments.nodes).await?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let lease = days_to_duration(arguments.days);
     let session = Session {
         client,
@@ -133,6 +140,7 @@ pub async fn store(
         account: &account,
         device: arguments.device.clone(),
         lease,
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;
@@ -190,15 +198,25 @@ pub async fn fetch(
 pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> anyhow::Result<()> {
     let account = read_account(&arguments.account)?;
     let list = load_node_list(client, &arguments.nodes).await?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let session = Session {
         client,
         list: &list,
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
-    let renewal = index.renew(&session).await?;
+    // With a coordinator, nodes that require tokens are paid at its prices;
+    // with a node list file there are no prices, and such nodes are left out.
+    let renewal = match coordinator_of(&arguments.nodes)? {
+        Some((coordinator, coordinators)) => {
+            let prices = NodePrices::fetch(client, coordinator, &coordinators).await?;
+            index.renew_through_tabs(&session, &prices).await?
+        }
+        None => index.renew(&session).await?,
+    };
     write_index(&arguments.index, &index)?;
     println!(
         "renewed {} pieces for {} days, {} not renewed",
@@ -215,6 +233,51 @@ pub async fn renew_all(client: &NodeClient, arguments: &AccountArguments) -> any
     Ok(())
 }
 
+/// Takes `count` tokens of `kind` for `email` from the coordinator and adds
+/// them to the account's wallet in the index.
+pub async fn take_tokens(
+    client: &NodeClient,
+    email: &str,
+    count: usize,
+    kind: TokenKind,
+    arguments: &AccountArguments,
+) -> anyhow::Result<()> {
+    let Some((coordinator, coordinators)) = coordinator_of(&arguments.nodes)? else {
+        anyhow::bail!("tokens come from a coordinator: give --coordinator with --coordinators");
+    };
+    let password = read_password()?;
+    let auth_key = mesh_client::sign_in::auth_key(client, coordinator, email, &password).await?;
+    let tokens = get_tokens(
+        client,
+        coordinator,
+        &coordinators,
+        email,
+        auth_key,
+        kind,
+        count,
+    )
+    .await?;
+    let account = read_account(&arguments.account)?;
+    let list = load_node_list(client, &arguments.nodes).await?;
+    let session = Session {
+        client,
+        list: &list,
+        account: &account,
+        device: arguments.device.clone(),
+        lease: days_to_duration(arguments.days),
+        coordinators: Some(&coordinators),
+    };
+    let mut index = read_index(&arguments.index)?;
+    index.pull(&session).await?;
+    index.add_tokens(&session, &tokens).await?;
+    write_index(&arguments.index, &index)?;
+    println!(
+        "{count} tokens added; the wallet holds {}",
+        index.wallet()?.tokens().len()
+    );
+    Ok(())
+}
+
 /// This device's index, brought up to date from nodes in `list` and saved.
 async fn pulled_index(
     client: &NodeClient,
@@ -222,12 +285,14 @@ async fn pulled_index(
     arguments: &AccountArguments,
 ) -> anyhow::Result<Index> {
     let account = read_account(&arguments.account)?;
+    let coordinators = read_coordinator_list(&arguments.nodes)?;
     let session = Session {
         client,
         list,
         account: &account,
         device: arguments.device.clone(),
         lease: days_to_duration(arguments.days),
+        coordinators: coordinators.as_ref(),
     };
     let mut index = read_index(&arguments.index)?;
     index.pull(&session).await?;

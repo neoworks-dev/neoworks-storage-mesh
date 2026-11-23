@@ -31,6 +31,7 @@ fn session<'a>(
         account,
         device: "laptop".to_string(),
         lease,
+        coordinators: None,
     }
 }
 
